@@ -49,6 +49,7 @@ from astrabot.chat_service.prompt_builder import (
 )
 from astrabot.chat_service.reply_controller import ReplyController, should_reply
 from astrabot.chat_service.search_engine import run_search
+from astrabot.chat_service.sticker_gallery import sticker_url
 from astrabot.config import get_config
 from astrabot.logmanager.logger import logger
 
@@ -61,12 +62,14 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     config = get_config()
     group_id = event.group_id
 
-    if group_id not in config.enabled_groups:
+    if config.enabled_groups and group_id not in config.enabled_groups:
         return
 
     user_id = str(event.user_id)
     plain_text = event.get_plaintext()
-    user_name = await _get_user_display_name(bot, group_id, event.user_id)
+    # 先用缓存昵称，未命中时用 QQ 号占位；真正的网络查询推迟到确认要回复之后。
+    cached_name = _NAME_CACHE.get((group_id, event.user_id))
+    user_name = cached_name[0] if cached_name and cached_name[1] > time.time() else user_id
 
     record_time = int(time.time())
     images_b64 = []
@@ -143,8 +146,9 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
             name = ""
             if qq and qq != "all":
                 try:
-                    info = await bot.get_group_member_info(group_id=group_id, user_id=int(qq))
-                    name = info.get("card") or info.get("nickname", "")
+                    name = await _get_user_display_name(bot, group_id, int(qq))
+                    if name == str(qq):
+                        name = ""
                 except Exception:
                     pass
             segments.append({"type": "at", "qq": qq, "name": name})
@@ -303,6 +307,9 @@ async def _reply_flow(
     config,
 ):
     """核心回复流程：构建上下文 → 插件预处理 → 图片分析 → 拼接 prompt → AI 调用（含搜索） → 发送回复"""
+    # 只有确定要回复时才查询真实昵称（命中缓存则无网络开销）
+    user_name = await _get_user_display_name(bot, group_id, int(user_id))
+
     # 在处理中途检查触发消息是否已被撤回
     if ReplyController.is_recalled(group_id, event.message_id):
         logger.info(f"Trigger message {event.message_id} was recalled, aborting reply")
@@ -659,6 +666,12 @@ async def _send_reply(
             segments.insert(0, MessageSegment.reply(event.message_id))
 
         message = segments[0] if len(segments) == 1 else segments
+        if pi == 0:
+            image_url = await sticker_url((reply_json or {}).get("sticker_id"))
+            if image_url:
+                if not isinstance(message, list):
+                    message = [message]
+                message.append(MessageSegment.image(image_url))
         await bot.send_group_msg(group_id=group_id, message=message)
 
     if record_reply:
@@ -697,9 +710,30 @@ async def _get_reply_user_id(bot: Bot, event: GroupMessageEvent) -> str | None:
     return None
 
 
+# 群成员昵称缓存：(group_id, user_id) -> (name, expire_at)
+# get_group_member_info 是一次网络往返，耗时 0.3~4 秒；同一成员在 TTL 内
+# 直接复用缓存，可显著降低每条消息的处理延迟。
+_NAME_CACHE: dict[tuple[int, int], tuple[str, float]] = {}
+_NAME_CACHE_TTL = 600.0
+
+
 async def _get_user_display_name(bot: Bot, group_id: int, user_id: int) -> str:
+    key = (group_id, user_id)
+    now = time.time()
+    cached = _NAME_CACHE.get(key)
+    if cached and cached[1] > now:
+        return cached[0]
+
     try:
         info = await bot.get_group_member_info(group_id=group_id, user_id=user_id)
-        return info.get("card") or info.get("nickname", str(user_id))
+        name = info.get("card") or info.get("nickname", str(user_id))
     except Exception:
-        return str(user_id)
+        # 失败时沿用旧缓存（若有），否则退回 QQ 号
+        name = cached[0] if cached else str(user_id)
+
+    _NAME_CACHE[key] = (name, now + _NAME_CACHE_TTL)
+    if len(_NAME_CACHE) > 2000:
+        # 简单的容量保护：丢弃已过期项
+        for k in [k for k, v in _NAME_CACHE.items() if v[1] <= now]:
+            _NAME_CACHE.pop(k, None)
+    return name

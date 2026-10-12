@@ -105,6 +105,10 @@ async def analyze_images(
     provider = config.VISUAL_API_PROVIDER
     model = config.VISUAL_API_MODEL
 
+    if not config.VISUAL_API_KEY or not model:
+        logger.info("Image analysis skipped: visual API is not configured")
+        return {}
+
     base_url = API_BASE_URLS.get(provider.upper(), API_BASE_URLS["SILICONFLOW"])
     api_key = config.VISUAL_API_KEY
 
@@ -162,13 +166,21 @@ async def generate_reply(
         messages.append({"role": "system", "content": config.system_prompt})
     messages.append({"role": "user", "content": prompt})
 
-    for protocol, base_url, api_key, model in [
-        (config.API_PROTOCOL, config.API_BASE_URL, config.API_KEY, config.API_MODEL),
-        (config.BACK_API_PROTOCOL, config.BACK_API_BASE_URL, config.BACK_API_KEY, config.BACK_API_MODEL),
-    ]:
+    providers = [(config.API_PROTOCOL, config.API_BASE_URL, config.API_KEY, config.API_MODEL)]
+    if config.BACK_API_KEY and config.BACK_API_MODEL and config.BACK_API_BASE_URL:
+        providers.append((config.BACK_API_PROTOCOL, config.BACK_API_BASE_URL, config.BACK_API_KEY, config.BACK_API_MODEL))
+
+    for protocol, base_url, api_key, model in providers:
         for retry in range(RETRY_LIMIT):
             try:
                 logger.debug(f"AI call attempt: protocol={protocol}, base_url={base_url}, model={model} (retry {retry + 1}/{RETRY_LIMIT})")
+                # reasoning 会先输出大段思维链，延迟通常增加 3~6 倍。
+                # 默认关闭以保证聊天响应速度，可用 AI_REASONING=true 开启。
+                use_reasoning = (
+                    protocol.upper() == "OPENAI"
+                    and os.environ.get("AI_REASONING", "false").strip().lower()
+                    in ("1", "true", "yes", "on")
+                )
                 result = await chat(
                     protocol=protocol,
                     base_url=base_url,
@@ -176,7 +188,7 @@ async def generate_reply(
                     model=model,
                     messages=messages,
                     response_format="json_object",
-                    reasoning=(protocol.upper() == "OPENAI"),
+                    reasoning=use_reasoning,
                     timeout=30,
                 )
                 content = result.get("content", "")

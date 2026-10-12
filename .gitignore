@@ -9,6 +9,9 @@ __pycache__/
 .venv/
 venv/
 env/
+.venv-*/
+.venv.*/
+venv-*/
 
 # Distribution / packaging
 *.egg-info/
@@ -17,8 +20,14 @@ dist/
 build/
 eggs/
 
-# Environment variables
+# Environment variables (含备份/变体，避免密钥泄露)
 .env
+.env.*
+!.env.example
+
+# Offline wheel caches
+wheels/
+wheels*/
 
 # Logs
 *.log

@@ -5,8 +5,46 @@ from __future__ import annotations
 import ast
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from dotenv import load_dotenv
+
+# .env 位于项目根目录（本文件的上上级目录）。
+# 必须使用绝对路径：find_dotenv() 依赖调用栈推断位置，在 Windows 上
+# 经 nonebot 加载插件后可能解析为空字符串，导致配置全部读不到。
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_ENV_FILE = _PROJECT_ROOT / ".env"
+
+
+def _normalize_no_proxy() -> None:
+    """清理 NO_PROXY 里的非法条目。
+
+    Clash 等代理工具会写入 ``[::1]``。httpx 会把 NO_PROXY 的每一项
+    当作 URL 解析，遇到方括号会抛 ``InvalidURL: Invalid port: ':1]'``，
+    导致所有 httpx 客户端创建失败。这里统一去掉括号。
+    """
+    for key in ("NO_PROXY", "no_proxy"):
+        value = os.environ.get(key)
+        if not value:
+            continue
+        parts = []
+        for item in value.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if item.startswith("[") and item.endswith("]"):
+                item = item[1:-1]
+            parts.append(item)
+        os.environ[key] = ",".join(parts)
+
+
+def _load_env() -> None:
+    """按绝对路径加载 .env；若不存在则回退到 dotenv 的默认查找。"""
+    if _ENV_FILE.is_file():
+        load_dotenv(_ENV_FILE, override=False)
+    else:
+        load_dotenv(override=False)
+    _normalize_no_proxy()
 
 
 @dataclass
@@ -50,31 +88,34 @@ class Config:
 
     @classmethod
     def load(cls) -> Config:
-        load_dotenv()
+        _load_env()
 
-        raw = {k: v for k, v in os.environ.items() if k != ""}
+        # Windows 的环境变量名大小写不敏感，但保留首次写入时的大小写。
+        # 这里统一做一次小写归一化，避免 .env 写的 name 与
+        # 系统里已存在的 NAME 冲突时读不到值。
+        raw: dict[str, str] = {}
+        for key, value in os.environ.items():
+            if not key:
+                continue
+            raw.setdefault(key, value)
+            raw.setdefault(key.lower(), value)
         required_str = ["name", "name_cn", "person_setting", "output_style", "reply_style", "extra_style", "image_analyzer"]
         for key in required_str:
             if not raw.get(key):
                 raise ValueError(f"Missing required config: {key}")
 
-        required_api = ["MINIMAX_API_KEY", "VISUAL_API_KEY"]
+        required_api = ["API_KEY"]
         for key in required_api:
             if not raw.get(key):
                 raise ValueError(f"Missing required config: {key}")
 
-        required_model_keys = ["API_MODEL", "BACK_API_MODEL", "VISUAL_API_MODEL"]
-        for key in required_model_keys:
-            if not raw.get(key):
-                raise ValueError(f"Missing required config: {key}")
+        if not raw.get("API_MODEL"):
+            raise ValueError("Missing required config: API_MODEL")
 
         required_chat_keys = [
             "API_PROTOCOL",
             "API_BASE_URL",
             "API_KEY",
-            "BACK_API_PROTOCOL",
-            "BACK_API_BASE_URL",
-            "BACK_API_KEY",
         ]
         for key in required_chat_keys:
             if not raw.get(key):
@@ -110,7 +151,7 @@ class Config:
             output_style=raw["output_style"],
             reply_style=raw["reply_style"],
             extra_style=raw["extra_style"],
-            image_analyzer=raw["image_analyzer"],
+            image_analyzer=raw.get("image_analyzer", "请结合上下文描述图片内容。"),
             reply_rate=floats["reply_rate"],
             reply_rate_at=floats["reply_rate_at"],
             reply_rate_in_reply=floats["reply_rate_in_reply"],

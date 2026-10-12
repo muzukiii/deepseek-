@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from nonebot import on_message, on_notice
-from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, NoticeEvent
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, NoticeEvent, PrivateMessageEvent
+from nonebot.adapters.onebot.v11.permission import PRIVATE
 
 from astrabot.chat_service.desktop_notify import send_desktop_notification
 from astrabot.chat_service.history_manager import delete_by_message_id
 from astrabot.chat_service.message_handler import handle_group_message
+from astrabot.chat_service.private_handler import handle_private_message
 from astrabot.chat_service.plugin_loader import PluginLoader
 from astrabot.chat_service.reply_controller import ReplyController
 from astrabot.logmanager.logger import logger
@@ -21,6 +23,13 @@ async def handle(bot: Bot, event: GroupMessageEvent):
 
 
 notice_handler = on_notice()
+
+private_reply = on_message(permission=PRIVATE, priority=10, block=True)
+
+
+@private_reply.handle()
+async def handle_private(bot: Bot, event: PrivateMessageEvent):
+    await handle_private_message(bot, event)
 
 
 @notice_handler.handle()

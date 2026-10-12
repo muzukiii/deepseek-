@@ -72,10 +72,23 @@ source .venv/bin/activate # Windows用./.venv/scripts/activate；fish用户用so
 pip install -e .
 ```
 
+#### Windows 离线安装
+
+若无网络，可先下载依赖轮子到 `wheels/`，再离线安装：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --no-index --find-links .\wheels -e .
+```
+
+> **重要**：请使用 python.org 官方 Windows 版 Python。MSYS2 / UCRT64 的 Python
+> 平台标签为 `mingw_x86_64_ucrt_gnu`，**无法安装** PyPI 上的 `win_amd64` 轮子
+> （`orjson`、`pydantic-core`、`jiter`、`cffi` 等编译型依赖会全部失败）。
+
 ### 配置
 
 ```bash
-# 复制环境变量模板
+# 复制环境变量模板（Windows: copy .env.example .env）
 cp .env.example .env
 
 # 编辑 .env，填入 API Key 和配置
@@ -107,6 +120,24 @@ cp .env.example .env
 
 ```bash
 nb run
+```
+
+也可以直接运行入口文件（等价于 `nb run`）：
+
+```bash
+python bot.py
+```
+
+> **注意**：`nb run` 会在当前目录自动查找 `bot.py` 并运行它。项目根目录的 `bot.py`
+> 会在 `nonebot.init()` 之前调用 `load_dotenv()`，确保 `.env` 中的 `DRIVER`、`HOST`、
+> `PORT` 等配置能被正确读取。若省略这一步，驱动会退化为默认的 `~fastapi`，
+> 它将**不支持 WebSocket 客户端连接**，导致无法连接 NapCat / SnowLuma。
+
+如果 `nb` 未能识别本项目使用的虚拟环境（例如项目内同时存在多个 venv 目录），
+可用 `-py` 显式指定解释器：
+
+```bash
+nb -py ./.venv/Scripts/python.exe run
 ```
 
 更多启动方式请参考 [NoneBot 文档](https://nonebot.dev/docs/)。

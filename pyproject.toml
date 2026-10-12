@@ -15,6 +15,14 @@ dependencies = [
     "orjson>=3.0.0",
 ]
 
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["astrabot*"]
+exclude = ["wheels*", "*.egg-info*"]
+
 [tool.nonebot]
 plugin_dirs = ["astrabot"]
 builtin_plugins = []
