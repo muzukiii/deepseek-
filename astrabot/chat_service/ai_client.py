@@ -152,6 +152,45 @@ def _clean_json(raw: str) -> str:
     return raw.strip()
 
 
+REPLY_FIELD_CANDIDATES = (
+    "reply",
+    "content",
+    "message",
+    "response",
+    "text",
+    "answer",
+    "回复",
+    "内容",
+)
+
+
+def _extract_reply(parsed: dict) -> str:
+    """从模型返回中尽力提取回复正文。
+
+    模型有时会把回复放在 content / message / response 等同义字段里
+    （即使提示词要求 reply）。此时不应直接判定为空并放弃，否则机器人
+    会表现为"收到消息但不回复"。
+    """
+    if not isinstance(parsed, dict):
+        return ""
+
+    for key in REPLY_FIELD_CANDIDATES:
+        value = parsed.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    # 兜底：只有一个非空字符串字段时直接使用它
+    strings = [
+        v.strip()
+        for k, v in parsed.items()
+        if isinstance(v, str) and v.strip() and k not in {"type", "status"}
+    ]
+    if len(strings) == 1:
+        return strings[0]
+
+    return ""
+
+
 RETRY_LIMIT = 3
 
 
@@ -204,8 +243,9 @@ async def generate_reply(
 
                 content = _clean_json(content)
                 parsed = json.loads(content)
-                reply_text = parsed.get("reply", "")
+                reply_text = _extract_reply(parsed)
                 if reply_text:
+                    parsed["reply"] = reply_text
                     return reply_text, parsed
                 if "reply" in parsed:
                     return "", parsed
