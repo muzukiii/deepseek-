@@ -101,16 +101,37 @@ async def analyze_images(
     images_base64: list[str],
     prompt: str,
 ) -> dict:
-    config = get_config()
-    provider = config.VISUAL_API_PROVIDER
-    model = config.VISUAL_API_MODEL
+    """识图：默认复用主 API（DeepSeek 多模态），也可切到独立视觉服务。
 
-    if not config.VISUAL_API_KEY or not model:
-        logger.info("Image analysis skipped: visual API is not configured")
+    DeepSeek 的图片按 token 计费且有硬上限（每张 ≤1024 token），
+    因此识图成本极低，无需单独申请视觉 API Key。
+    """
+    config = get_config()
+    provider = (config.VISUAL_API_PROVIDER or "").strip().upper()
+
+    # 解析使用哪个服务：主 API 还是独立视觉 API
+    use_main_api = provider in ("", "MAIN", "DEEPSEEK") or not config.VISUAL_API_KEY
+    if use_main_api:
+        base_url = config.API_BASE_URL
+        api_key = config.API_KEY
+        model = config.VISUAL_API_MODEL or config.API_MODEL
+    else:
+        base_url = API_BASE_URLS.get(provider, API_BASE_URLS["SILICONFLOW"])
+        api_key = config.VISUAL_API_KEY
+        model = config.VISUAL_API_MODEL
+
+    if not api_key or not model:
+        logger.info("Image analysis skipped: no usable vision API configured")
         return {}
 
-    base_url = API_BASE_URLS.get(provider.upper(), API_BASE_URLS["SILICONFLOW"])
-    api_key = config.VISUAL_API_KEY
+    # 单次请求的图片数量上限，避免群内刷图时一次性把成本放大
+    max_images = max(1, config.vision_max_images)
+    if len(images_base64) > max_images:
+        logger.info(
+            f"Image analysis: {len(images_base64)} images provided, "
+            f"only analyzing the first {max_images}"
+        )
+        images_base64 = images_base64[:max_images]
 
     http_client = _get_httpx_client()
     client = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
@@ -119,7 +140,12 @@ async def analyze_images(
     for b64 in images_base64:
         content_parts.append({
             "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+            # detail=low 会先把图缩到 512x512，token 更省；
+            # 需要看清细节时可在 .env 里改成 high/original。
+            "image_url": {
+                "url": f"data:image/jpeg;base64,{b64}",
+                "detail": config.vision_detail,
+            },
         })
 
     messages = [{"role": "user", "content": content_parts}]
@@ -132,7 +158,17 @@ async def analyze_images(
             timeout=60,
         )
         content = response.choices[0].message.content or "{}"
-        return json.loads(content)
+        result = json.loads(_clean_json(content))
+        usage = getattr(response, "usage", None)
+        if usage:
+            logger.debug(
+                f"Image analysis ok: {len(images_base64)} image(s), "
+                f"prompt={usage.prompt_tokens} completion={usage.completion_tokens}"
+            )
+        return result
+    except json.JSONDecodeError as e:
+        logger.error(f"Image analysis returned non-JSON: {e}")
+        return {}
     except Exception as e:
         logger.error(f"Image analysis failed: {e}")
         return {}

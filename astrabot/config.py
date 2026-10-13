@@ -71,6 +71,13 @@ class Config:
     memory_facts: int = 6
     long_term_memories: int = 12
 
+    # 识图：默认复用主 API（DeepSeek 多模态），无需额外 Key。
+    # 单张图 token 有硬上限（≤1024），成本很低，但仍限制单次图片数量，
+    # 避免群内刷图时一次性放大开销。
+    vision_provider: str = "MAIN"
+    vision_detail: str = "low"
+    vision_max_images: int = 3
+
     # 四种回复概率，分别对应：普通消息 / @触发 / 回复中继续搭话 / 回复中被@插入
     reply_rate: float = 0.1
     reply_rate_at: float = 1.0
@@ -168,6 +175,12 @@ class Config:
         history_messages = _int_env("history_messages", 25, 5, 100)
         memory_facts = _int_env("memory_facts", 6, 0, 30)
         long_term_memories = _int_env("long_term_memories", 12, 0, 100)
+        vision_max_images = _int_env("vision_max_images", 3, 1, 20)
+
+        vision_provider = str(raw.get("vision_provider", "MAIN")).strip().upper() or "MAIN"
+        vision_detail = str(raw.get("vision_detail", "low")).strip().lower()
+        if vision_detail not in ("low", "high", "original", "auto"):
+            vision_detail = "low"
 
         return cls(
             name=raw["name"],
@@ -179,6 +192,9 @@ class Config:
             history_messages=history_messages,
             memory_facts=memory_facts,
             long_term_memories=long_term_memories,
+            vision_provider=vision_provider,
+            vision_detail=vision_detail,
+            vision_max_images=vision_max_images,
             output_style=raw["output_style"],
             reply_style=raw["reply_style"],
             extra_style=raw["extra_style"],
