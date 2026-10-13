@@ -734,27 +734,30 @@ async def _send_reply(
     text = re.sub(rf"\[at:{self_id}\]", "", text)
     text = re.sub(r"\s{2,}", " ", text).strip()
 
-    parts = text.split("[/]")
-    for pi, part in enumerate(parts):
-        segments: list = []
-        _append_with_at(segments, part)
-        if is_reply_to and pi == 0:
-            segments.insert(0, MessageSegment.reply(event.message_id))
+    # [/] 原本是拆成多条消息发送（模仿真人连发多气泡），现在合并为
+    # 单条消息、用换行分隔，避免刷屏并让回答更完整。
+    joined = "\n".join(
+        part.strip() for part in text.split("[/]") if part.strip()
+    )
 
-        message = segments[0] if len(segments) == 1 else segments
-        if pi == 0:
-            image_url = await sticker_url((reply_json or {}).get("sticker_id"))
-            if image_url:
-                if not isinstance(message, list):
-                    message = [message]
-                message.append(MessageSegment.image(image_url))
-        await bot.send_group_msg(group_id=group_id, message=message)
+    segments: list = []
+    _append_with_at(segments, joined)
+    if is_reply_to:
+        segments.insert(0, MessageSegment.reply(event.message_id))
+
+    message = segments[0] if len(segments) == 1 else segments
+    image_url = await sticker_url((reply_json or {}).get("sticker_id"))
+    if image_url:
+        if not isinstance(message, list):
+            message = [message]
+        message.append(MessageSegment.image(image_url))
+    await bot.send_group_msg(group_id=group_id, message=message)
 
     if record_reply:
         config = get_config()
-        plain = re.sub(r"\[at:\d+\]", "", text)
+        plain = re.sub(r"\[at:\d+\]", "", joined)
 
-        plain = plain.replace("[/]", " ").strip()
+        plain = plain.replace("[/]", "\n").strip()
         reply_record = {
             "time": int(time.time()),
             "user_id": str(bot.self_id),
