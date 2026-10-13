@@ -48,6 +48,12 @@ def build_main_prompt(
         parts.append("【相关记忆】以下是与当前对话相关的记忆：")
         parts.append(relevant_facts)
 
+    if long_term_memory or relevant_facts:
+        parts.append(
+            "（记忆只是背景参考，用来理解人物关系和前情，"
+            "不要照抄或复述；回复请以【最近的聊天记录】里正在发生的事为准。）"
+        )
+
 
     # 旧版记忆仅在增强记忆系统没有长期记忆时展示，避免重复
     if memory_section and not long_term_memory:
@@ -61,8 +67,14 @@ def build_main_prompt(
         parts.append(personal_memory_section)
 
     parts.append("")
-    parts.append("这是最近的聊天记录：")
+    parts.append("这是最近的聊天记录（从上到下按时间顺序，最后一条是刚刚发生的）：")
     parts.append(formatted_history)
+    parts.append("")
+    parts.append(
+        "请顺着上面这段对话的脉络接话：先理解当前正在聊什么，"
+        "再回应最后那条消息。不要重复你之前已经说过的话，"
+        "也不要突然跳到无关话题。"
+    )
     parts.append("")
     parts.append(trigger_marker)
 

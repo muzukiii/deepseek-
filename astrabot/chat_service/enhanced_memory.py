@@ -299,20 +299,38 @@ def add_long_term_memory(
         return False
 
 
-def get_long_term_memories(group_id: int) -> list[dict]:
-    """获取所有长期记忆"""
+def get_long_term_memories(group_id: int, limit: int | None = None) -> list[dict]:
+    """获取长期记忆。
+
+    limit 为 None 时返回全部；否则只取最近 limit 条（按时间正序返回，
+    便于阅读）。长期记忆会无条件拼进每次请求，不限量会持续膨胀并挤占
+    真实对话的上下文预算。
+    """
     conn = _get_db()
     conn.row_factory = sqlite3.Row
 
+    if limit is None:
+        cur = conn.execute(
+            """SELECT id, content, created_at, created_by
+               FROM long_term_memories
+               WHERE group_id = ?
+               ORDER BY created_at ASC""",
+            (group_id,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    # 先按时间倒序取最近的 N 条，再翻转成正序
     cur = conn.execute(
         """SELECT id, content, created_at, created_by
            FROM long_term_memories
            WHERE group_id = ?
-           ORDER BY created_at ASC""",
-        (group_id,),
+           ORDER BY created_at DESC
+           LIMIT ?""",
+        (group_id, limit),
     )
-
-    return [dict(row) for row in cur.fetchall()]
+    rows = [dict(row) for row in cur.fetchall()]
+    rows.reverse()
+    return rows
 
 
 def delete_long_term_memory(group_id: int, memory_id: int) -> bool:
@@ -366,24 +384,35 @@ def get_all_user_impressions(group_id: int) -> dict[str, str]:
 
 
 
+_TS_PREFIX = re.compile(r"^\[?\d{2}-\d{2}\s+\d{2}:\d{2}\]?\s*")
+
+
+def _strip_ts(text: str) -> str:
+    """去掉内容开头已有的时间戳，避免与渲染时添加的重复。"""
+    return _TS_PREFIX.sub("", (text or "").strip())
+
+
 def build_memory_context(
     group_id: int,
     current_message: str,
     relevant_user_ids: set[str],
+    max_facts: int = 6,
+    max_long_term: int = 12,
 ) -> dict[str, str]:
     """构建记忆上下文，返回各部分记忆文本"""
 
-
-    ltm = get_long_term_memories(group_id)
+    ltm = get_long_term_memories(group_id, limit=max_long_term)
     ltm_text = "\n".join(
-        f"{i+1}. [{datetime.fromtimestamp(m['created_at']).strftime('%m-%d %H:%M')}] {m['content']}"
+        f"{i+1}. [{datetime.fromtimestamp(m['created_at']).strftime('%m-%d %H:%M')}] "
+        f"{_strip_ts(m['content'])}"
         for i, m in enumerate(ltm)
     ) if ltm else ""
 
-    # 中期记忆：取最近的事实，不依赖关键词搜索（中文分词效果差）
-    recent_facts = get_recent_facts(group_id, limit=10)
+    # 中期记忆：取最近的事实（数量可配，过多会挤占真实对话的注意力）
+    recent_facts = get_recent_facts(group_id, limit=max_facts)
     facts_text = "\n".join(
-        f"- [{datetime.fromtimestamp(f['created_at']).strftime('%m-%d %H:%M')}] {f['fact']}"
+        f"- [{datetime.fromtimestamp(f['created_at']).strftime('%m-%d %H:%M')}] "
+        f"{_strip_ts(f['fact'])}"
         for f in recent_facts
     ) if recent_facts else ""
 

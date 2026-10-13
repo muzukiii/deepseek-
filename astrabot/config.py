@@ -64,6 +64,13 @@ class Config:
     # 引用回复：回复时引用触发的那条消息（QQ 气泡上方显示"回复 XXX"）
     quote_reply: bool = False
 
+    # 上下文规模：聊天记录条数 / 中期记忆条数
+    # 聊天记录是"原文"，记忆是"摘要"。摘要过长会挤占模型对当前对话的注意力，
+    # 导致答非所问、上下文割裂，因此记忆条数应显著少于聊天记录。
+    history_messages: int = 25
+    memory_facts: int = 6
+    long_term_memories: int = 12
+
     # 四种回复概率，分别对应：普通消息 / @触发 / 回复中继续搭话 / 回复中被@插入
     reply_rate: float = 0.1
     reply_rate_at: float = 1.0
@@ -152,6 +159,16 @@ class Config:
             "on",
         )
 
+        def _int_env(key: str, default: int, lo: int, hi: int) -> int:
+            try:
+                return max(lo, min(hi, int(str(raw.get(key, default)).strip())))
+            except (ValueError, TypeError):
+                return default
+
+        history_messages = _int_env("history_messages", 25, 5, 100)
+        memory_facts = _int_env("memory_facts", 6, 0, 30)
+        long_term_memories = _int_env("long_term_memories", 12, 0, 100)
+
         return cls(
             name=raw["name"],
             name_cn=raw["name_cn"],
@@ -159,6 +176,9 @@ class Config:
             enabled_groups=enabled_groups,
             keyword=keyword,
             quote_reply=quote_reply,
+            history_messages=history_messages,
+            memory_facts=memory_facts,
+            long_term_memories=long_term_memories,
             output_style=raw["output_style"],
             reply_style=raw["reply_style"],
             extra_style=raw["extra_style"],

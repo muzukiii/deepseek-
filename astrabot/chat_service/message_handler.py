@@ -325,7 +325,11 @@ async def _reply_flow(
 
     plugin_since = int(time.time())  # 记录插件执行前的时间戳，后续用于获取执行期间的新消息
 
-    history = await select_context(group_id, max_messages=15, exclude_message_id=event.message_id)
+    history = await select_context(
+        group_id,
+        max_messages=config.history_messages,
+        exclude_message_id=event.message_id,
+    )
     reply_context = await _extract_reply_context(bot, group_id, event, config)
 
     current_image_descs: list[str] = []
@@ -421,6 +425,8 @@ async def _reply_flow(
         group_id=group_id,
         current_message=plain_text,
         relevant_user_ids=relevant_uids,
+        max_facts=config.memory_facts,
+        max_long_term=config.long_term_memories,
     )
     logger.debug(f"Enhanced memory context: LTM={len(memory_ctx['long_term'])} chars, Facts={len(memory_ctx['facts'])} chars")
 
