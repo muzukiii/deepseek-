@@ -61,6 +61,9 @@ class Config:
 
     keyword: list[str] = field(default_factory=list)
 
+    # 引用回复：回复时引用触发的那条消息（QQ 气泡上方显示"回复 XXX"）
+    quote_reply: bool = False
+
     # 四种回复概率，分别对应：普通消息 / @触发 / 回复中继续搭话 / 回复中被@插入
     reply_rate: float = 0.1
     reply_rate_at: float = 1.0
@@ -142,12 +145,20 @@ class Config:
         else:
             keyword = list(keyword_raw)
 
+        quote_reply = str(raw.get("quote_reply", "false")).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+
         return cls(
             name=raw["name"],
             name_cn=raw["name_cn"],
             person_setting=raw["person_setting"],
             enabled_groups=enabled_groups,
             keyword=keyword,
+            quote_reply=quote_reply,
             output_style=raw["output_style"],
             reply_style=raw["reply_style"],
             extra_style=raw["extra_style"],

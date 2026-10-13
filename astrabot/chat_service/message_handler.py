@@ -708,13 +708,25 @@ async def _send_reply(
     record_reply: bool = False,
 ):
     """发送回复消息，支持 [/] 分段发送和 [at:qq] 引用，可选记录到历史"""
-    is_reply_to = (reply_json or {}).get("is_reply_to", False)
+    # 引用回复：可通过 .env 的 quote_reply 控制；模型也可用 is_reply_to 单独指定
+    cfg_for_quote = get_config()
+    is_reply_to = (reply_json or {}).get("is_reply_to", cfg_for_quote.quote_reply)
 
     # 模型常写「@昵称」而不用 [at:QQ号]，这里做一次确定性转换，
     # 保证 @ 真的能提醒到人（普通文字形式的 @ 不会触发任何通知）。
+    self_id = int(bot.self_id)
     if "@" in text:
+        cfg = get_config()
         name_to_qq = await _get_group_name_map(bot, group_id)
+        # 机器人自己的名字不应被当成 @ 目标，否则会 @ 到自己
+        for own in (cfg.name_cn, cfg.name):
+            if own:
+                name_to_qq.pop(str(own).strip(), None)
         text = resolve_plain_at(text, name_to_qq)
+
+    # 模型偶尔直接写 [at:机器人自己]，@ 自己毫无意义，降级为普通文字
+    text = re.sub(rf"\[at:{self_id}\]", "", text)
+    text = re.sub(r"\s{2,}", " ", text).strip()
 
     parts = text.split("[/]")
     for pi, part in enumerate(parts):
