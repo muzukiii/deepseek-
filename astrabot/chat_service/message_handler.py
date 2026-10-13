@@ -56,6 +56,10 @@ from astrabot.logmanager.logger import logger
 TOTAL_TIMEOUT = 360
 MAX_SEARCH_ROUNDS = 3
 
+# 群成员「昵称 -> QQ号」映射缓存：group_id -> (mapping, expire_at)
+_NAME_MAP_CACHE: dict[int, tuple[dict[str, int], float]] = {}
+_NAME_MAP_TTL = 600.0
+
 
 async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     """群消息入口：解析消息段 → 存历史 → 判断是否需要回复 → 进入回复流程"""
@@ -647,6 +651,54 @@ def _append_with_at(segments: list, text: str):
             segments.append(MessageSegment.at(int(p)))
 
 
+def resolve_plain_at(text: str, name_to_qq: dict[str, int]) -> str:
+    """把模型写的普通「@昵称」转换成真正的 [at:QQ号] 标记。
+
+    模型经常不遵守 [at:QQ号] 的输出约定，而是直接写「@昵称」。
+    那在 QQ 里只是普通文字，对方既不会收到提醒也不会高亮。
+    这里根据已知的群成员昵称做一次确定性替换，保证 @ 真的生效。
+    """
+    if not text or "@" not in text or not name_to_qq:
+        return text
+
+    # 长昵称优先，避免 "小明" 抢先匹配掉 "小明的朋友"
+    for name in sorted(name_to_qq, key=len, reverse=True):
+        if not name:
+            continue
+        qq = name_to_qq[name]
+        # 已经是 [at:...] 形式的不动；只替换裸露的 @昵称
+        pattern = re.compile(r"@" + re.escape(name) + r"(?!\d)(?!\])")
+        if pattern.search(text):
+            text = pattern.sub(f"[at:{qq}]", text)
+
+    return text
+
+
+async def _get_group_name_map(bot: Bot, group_id: int) -> dict[str, int]:
+    """获取「群昵称 -> QQ号」映射，结果缓存 10 分钟。"""
+    now = time.time()
+    cached = _NAME_MAP_CACHE.get(group_id)
+    if cached and cached[1] > now:
+        return cached[0]
+
+    mapping: dict[str, int] = {}
+    try:
+        members = await bot.get_group_member_list(group_id=group_id)
+        for m in members or []:
+            uid = m.get("user_id")
+            if uid is None:
+                continue
+            for key in (m.get("card"), m.get("nickname")):
+                if key and str(key).strip():
+                    mapping[str(key).strip()] = int(uid)
+    except Exception as e:
+        logger.debug(f"Failed to fetch group member list for {group_id}: {e}")
+        return cached[0] if cached else {}
+
+    _NAME_MAP_CACHE[group_id] = (mapping, now + _NAME_MAP_TTL)
+    return mapping
+
+
 async def _send_reply(
     bot: Bot,
     event: GroupMessageEvent,
@@ -657,6 +709,12 @@ async def _send_reply(
 ):
     """发送回复消息，支持 [/] 分段发送和 [at:qq] 引用，可选记录到历史"""
     is_reply_to = (reply_json or {}).get("is_reply_to", False)
+
+    # 模型常写「@昵称」而不用 [at:QQ号]，这里做一次确定性转换，
+    # 保证 @ 真的能提醒到人（普通文字形式的 @ 不会触发任何通知）。
+    if "@" in text:
+        name_to_qq = await _get_group_name_map(bot, group_id)
+        text = resolve_plain_at(text, name_to_qq)
 
     parts = text.split("[/]")
     for pi, part in enumerate(parts):
