@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from astrabot.config import Config
@@ -81,6 +82,28 @@ def build_main_prompt(
     return "\n".join(parts)
 
 
+_CQ_IMAGE = re.compile(r"\[CQ:image,[^\]]*\]")
+_CQ_AT = re.compile(r"\[CQ:at,qq=([^\],]+)[^\]]*\]")
+_CQ_FACE = re.compile(r"\[CQ:face,[^\]]*\]")
+_CQ_OTHER = re.compile(r"\[CQ:[^\]]*\]")
+
+
+def _clean_history_text(text: str) -> str:
+    """压缩历史记录里的富文本噪音。
+
+    历史里常混入完整的 CQ 码，其中图片 URL 长达上百字符且对理解
+    对话毫无帮助，反而挤占上下文并干扰模型判断。这里把它们统一
+    替换成简短标记。
+    """
+    if not text:
+        return ""
+    text = _CQ_IMAGE.sub("[图片]", text)
+    text = _CQ_AT.sub(lambda m: f"@{m.group(1)}", text)
+    text = _CQ_FACE.sub("[表情]", text)
+    text = _CQ_OTHER.sub("", text)
+    return text.strip()
+
+
 def format_history(
     history: list[dict],
     history_image_descs: dict[tuple[int, int], str] | None = None,
@@ -102,9 +125,12 @@ def format_history(
                 if seg["type"] == "reply":
                     ruid = seg.get("user_id", "")
                     rname = seg.get("user_name", "")
-                    rmsg = seg.get("message", "")
+                    rmsg = _clean_history_text(seg.get("message", ""))
+                    # 引用的正文截断，避免它喧宾夺主
+                    if len(rmsg) > 30:
+                        rmsg = rmsg[:30] + "…"
                     if ruid:
-                        reply_info = f"回复{rname}({ruid})：{rmsg}"
+                        reply_info = f"回复{rname}：{rmsg}"
                     elif rmsg:
                         reply_info = rmsg
                 elif seg["type"] == "text":
@@ -118,21 +144,25 @@ def format_history(
                 elif seg["type"] == "image":
                     desc = history_image_descs.get((msg_idx, seg_idx), "")
                     if desc:
-                        parts.append(f"[图片][图片描述：{desc}]")
+                        parts.append(f"[图片：{desc}]")
                     else:
                         parts.append("[图片]")
-            msg_text = "".join(parts)
+            msg_text = _clean_history_text("".join(parts))
             if reply_info:
                 line = f"{user_name}({user_id})（{reply_info}）：{msg_text}"
             else:
                 line = f"{user_name}({user_id})：{msg_text}"
         else:
-            text = msg.get("message", "")
+            text = _clean_history_text(msg.get("message", ""))
             line = f"{user_name}({user_id})：{text}"
+
+        # 跳过空内容行：形如"某人(123)："后面什么都没有，纯噪音
+        if not line.split("：", 1)[-1].strip():
+            continue
 
         lines.append(line)
 
-    return "\n".join(lines)
+    return "\n".join(lines) if lines else "（暂无聊天记录）"
 
 
 def build_message_text(
