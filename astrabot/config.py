@@ -78,6 +78,10 @@ class Config:
     vision_detail: str = "low"
     vision_max_images: int = 3
 
+    # 戳一戳：被戳时是否回应，以及是否回戳对方
+    poke_reply: bool = True
+    poke_back: bool = True
+
     # 四种回复概率，分别对应：普通消息 / @触发 / 回复中继续搭话 / 回复中被@插入
     reply_rate: float = 0.1
     reply_rate_at: float = 1.0
@@ -182,6 +186,13 @@ class Config:
         if vision_detail not in ("low", "high", "original", "auto"):
             vision_detail = "low"
 
+        def _bool_env(key: str, default: bool) -> bool:
+            val = str(raw.get(key, default)).strip().lower()
+            return val in ("1", "true", "yes", "on")
+
+        poke_reply = _bool_env("poke_reply", True)
+        poke_back = _bool_env("poke_back", True)
+
         return cls(
             name=raw["name"],
             name_cn=raw["name_cn"],
@@ -192,6 +203,8 @@ class Config:
             history_messages=history_messages,
             memory_facts=memory_facts,
             long_term_memories=long_term_memories,
+            poke_reply=poke_reply,
+            poke_back=poke_back,
             vision_provider=vision_provider,
             vision_detail=vision_detail,
             vision_max_images=vision_max_images,

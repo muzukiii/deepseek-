@@ -11,6 +11,7 @@ from astrabot.chat_service.history_manager import delete_by_message_id
 from astrabot.chat_service.message_handler import handle_group_message
 from astrabot.chat_service.private_handler import handle_private_message
 from astrabot.chat_service.plugin_loader import PluginLoader
+from astrabot.chat_service.poke_handler import handle_poke
 from astrabot.chat_service.reply_controller import ReplyController
 from astrabot.logmanager.logger import logger
 
@@ -54,6 +55,9 @@ async def handle_notice(bot: Bot, event: NoticeEvent):
         tag = data.get("tag", "")
         logger.warning(f"Bot offline detected: tag={tag}, message={msg}")
         send_desktop_notification("AstraBot 离线通知", "QQ凭证过期，请重新登录")
+
+    elif notice_type == "poke":
+        await handle_poke(bot, data)
 
 
 PluginLoader.load_all()
