@@ -8,6 +8,7 @@ GroupMessageEvent 的诸多字段）。
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 
 from nonebot.adapters.onebot.v11 import Bot, MessageSegment
@@ -16,6 +17,11 @@ from astrabot.chat_service.ai_client import generate_reply
 from astrabot.chat_service.history_manager import (
     append_message,
     select_context,
+)
+from astrabot.chat_service.message_handler import (
+    _append_with_at,
+    _get_group_name_map,
+    resolve_plain_at,
 )
 from astrabot.chat_service.prompt_builder import format_history
 from astrabot.config import get_config
@@ -116,7 +122,32 @@ async def handle_poke(bot: Bot, data: dict) -> None:
     if not reply_text:
         return
 
-    segments: list = [MessageSegment.text(reply_text)]
+    # 与群消息一致地处理标记：
+    #   普通「@昵称」 -> [at:QQ号]
+    #   [/]         -> 换行
+    # 最后由 _append_with_at 把 [at:QQ号] 变成真正的 @ 消息段。
+    self_id = int(bot.self_id)
+    if "@" in reply_text:
+        name_to_qq = await _get_group_name_map(bot, group_id) if group_id else {}
+        for own in (config.name_cn, config.name):
+            if own:
+                name_to_qq.pop(str(own).strip(), None)
+        reply_text = resolve_plain_at(reply_text, name_to_qq)
+
+    reply_text = re.sub(rf"\[at:{self_id}\]", "", reply_text)
+    reply_text = "\n".join(
+        part.strip() for part in reply_text.split("[/]") if part.strip()
+    )
+    reply_text = re.sub(r"[ \t]{2,}", " ", reply_text).strip()
+    if not reply_text:
+        return
+
+    plain_for_history = re.sub(r"\[at:\d+\]", "", reply_text).strip()
+
+    segments: list = []
+    _append_with_at(segments, reply_text)
+    if not segments:
+        return
 
     try:
         if group_id:
@@ -127,7 +158,7 @@ async def handle_poke(bot: Bot, data: dict) -> None:
                     "time": int(time.time()),
                     "user_id": str(bot.self_id),
                     "user_name": config.name_cn,
-                    "message": reply_text,
+                    "message": plain_for_history,
                     "msg_type": "bot",
                     "images": None,
                 },
