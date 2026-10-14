@@ -37,6 +37,13 @@ async def handle_private(bot: Bot, event: PrivateMessageEvent):
 async def handle_notice(bot: Bot, event: NoticeEvent):
     data = event.model_dump()
     notice_type = data.get("notice_type")
+    sub_type = data.get("sub_type")
+
+    # 戳一戳在不同实现里字段位置不同：
+    # 有的是 notice_type="poke"，SnowLuma 则是 notice_type="notify" + sub_type="poke"
+    if notice_type == "poke" or (notice_type == "notify" and sub_type == "poke"):
+        await handle_poke(bot, data)
+        return
 
     if notice_type == "group_recall":
         group_id = data.get("group_id")
@@ -55,9 +62,6 @@ async def handle_notice(bot: Bot, event: NoticeEvent):
         tag = data.get("tag", "")
         logger.warning(f"Bot offline detected: tag={tag}, message={msg}")
         send_desktop_notification("AstraBot 离线通知", "QQ凭证过期，请重新登录")
-
-    elif notice_type == "poke":
-        await handle_poke(bot, data)
 
 
 PluginLoader.load_all()
