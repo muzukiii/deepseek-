@@ -1,6 +1,7 @@
 @echo off
 chcp 65001 >nul
 title AstraBot
+setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 echo ============================================
@@ -16,6 +17,18 @@ if not exist ".venv-win\Scripts\python.exe" (
 
 if not exist ".env" (
     echo [ERROR] .env not found
+    pause
+    exit /b 1
+)
+
+REM --- ??????????????? (Errno 10048) ---
+set "RUNPID="
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8080" ^| findstr "LISTENING"') do set "RUNPID=%%a"
+
+if defined RUNPID (
+    echo [ERROR] AstraBot is already running ^(PID !RUNPID!^) on port 8080.
+    echo         Close it first, or run stop-all.bat
+    echo.
     pause
     exit /b 1
 )

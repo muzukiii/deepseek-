@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 title AstraBot Launcher
-setlocal
+setlocal enabledelayedexpansion
 
 set "BOT_DIR=%~dp0"
 set "SL_DIR=C:\Users\li204\Documents\git\tools\SnowLuma"
@@ -10,6 +10,18 @@ echo ============================================
 echo   AstraBot one-click launcher
 echo ============================================
 echo.
+
+REM --- ?????????????????? (Errno 10048) ---
+set "RUNPID="
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8080" ^| findstr "LISTENING"') do set "RUNPID=%%a"
+
+if defined RUNPID (
+    echo [INFO] AstraBot is already running ^(PID !RUNPID!^) on port 8080.
+    echo        Nothing to do. Run stop-all.bat first if you want to restart.
+    echo.
+    pause
+    exit /b 0
+)
 
 echo [1/3] Checking SnowLuma (WebUI 5099 / OneBot 3001)...
 netstat -ano | findstr ":5099" | findstr "LISTENING" >nul
@@ -35,7 +47,7 @@ set /a tries=0
 netstat -ano | findstr ":3001" | findstr "LISTENING" >nul
 if not errorlevel 1 goto portready
 set /a tries+=1
-if %tries% GEQ 25 goto porttimeout
+if !tries! GEQ 25 goto porttimeout
 ping -n 3 127.0.0.1 >nul
 goto waitloop
 

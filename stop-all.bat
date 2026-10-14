@@ -7,6 +7,7 @@ echo   Stopping AstraBot / SnowLuma
 echo ============================================
 echo.
 
+REM --- AstraBot: ??????????????? python ???? ---
 set "BOTPID="
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8080" ^| findstr "LISTENING"') do set "BOTPID=%%a"
 
@@ -22,6 +23,12 @@ if defined BOTPID (
     echo [1/2] AstraBot is not running
 )
 
+REM --- ????? bot.py ?????????????????---
+for /f "skip=1 tokens=2 delims=," %%p in ('wmic process where "name='python.exe'" get processid^,commandline /format:csv 2^>nul ^| findstr "bot.py"') do (
+    taskkill /PID %%p /T /F >nul 2>&1
+)
+
+REM --- SnowLuma ---
 set "SLPID="
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":5099" ^| findstr "LISTENING"') do set "SLPID=%%a"
 
