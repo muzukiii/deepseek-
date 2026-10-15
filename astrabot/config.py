@@ -92,6 +92,13 @@ class Config:
     sticker_max_count: int = 200
     sticker_catalog_size: int = 20
 
+    # 防互刷：
+    # ignore_users 里的 QQ 完全不回复（即使被 @）——用于排除其它机器人
+    ignore_users: set[str] = field(default_factory=set)
+    # 同一人连续被回复的上限，超过则停止；0 表示不限制。
+    # 用于兜底：即便出现未知的循环，也会在若干轮后自动停下。
+    max_reply_streak: int = 3
+
     # 四种回复概率，分别对应：普通消息 / @触发 / 回复中继续搭话 / 回复中被@插入
     reply_rate: float = 0.1
     reply_rate_at: float = 1.0
@@ -227,6 +234,29 @@ class Config:
         sticker_max_count = _int_env("sticker_max_count", 200, 0, 5000)
         sticker_catalog_size = _int_env("sticker_catalog_size", 20, 0, 100)
 
+        max_reply_streak = _int_env("max_reply_streak", 3, 0, 50)
+
+        # 忽略名单：支持 ignore_users=[123,456] 或 123,456
+        ignore_raw = raw.get("ignore_users", "")
+        ignore_users: set[str] = set()
+        if ignore_raw:
+            try:
+                parsed_ignore = (
+                    ast.literal_eval(ignore_raw)
+                    if isinstance(ignore_raw, str) and ignore_raw.strip().startswith("[")
+                    else str(ignore_raw).split(",")
+                )
+                if isinstance(parsed_ignore, (list, tuple, set)):
+                    ignore_users = {
+                        str(x).strip() for x in parsed_ignore if str(x).strip()
+                    }
+                else:
+                    ignore_users = {str(parsed_ignore).strip()}
+            except (ValueError, SyntaxError):
+                ignore_users = {
+                    x.strip() for x in str(ignore_raw).split(",") if x.strip()
+                }
+
         return cls(
             name=raw["name"],
             name_cn=raw["name_cn"],
@@ -234,6 +264,8 @@ class Config:
             enabled_groups=enabled_groups,
             keyword=keyword,
             command_allowed_users=allowed_users,
+            ignore_users=ignore_users,
+            max_reply_streak=max_reply_streak,
             sticker_enabled=sticker_enabled,
             sticker_autosave=sticker_autosave,
             sticker_max_count=sticker_max_count,

@@ -195,6 +195,15 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     is_at = event.is_tome()
     is_keyword = any(plain_text.startswith(k) for k in config.keyword) if config.keyword else False
 
+    # 忽略名单：通常是群里的另一个机器人。即使被它 @ 也不回应，
+    # 否则两个机器人会陷入无限互相回复。
+    if str(user_id) in config.ignore_users:
+        logger.info(
+            f"Ignored message from {user_name}({user_id}) in group {group_id}: "
+            f"user is in ignore_users"
+        )
+        return
+
     if is_user_ignored(group_id, user_id, is_at):
         logger.debug(f"Ignored user {user_name}({user_id}) in group {group_id}")
         return
@@ -203,6 +212,18 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     if await _is_bot_muted(bot, group_id):
         logger.info(f"Bot is muted in group {group_id}, skipping reply")
         return
+
+    # 连续互回限制：同一人已被连续回复 max_reply_streak 次就停下，
+    # 等其他人插话（换人即归零）。这是兜底，防止任何形式的对话死循环。
+    if config.max_reply_streak > 0:
+        streak = ReplyController.peek_streak(group_id, user_id)
+        if streak >= config.max_reply_streak:
+            logger.info(
+                f"Skipped reply to {user_name}({user_id}) in group {group_id}: "
+                f"reply streak reached {streak}/{config.max_reply_streak}. "
+                f"Waiting for someone else to speak."
+            )
+            return
 
     lock = ReplyController.get_lock(group_id)
     if lock.locked():
@@ -223,6 +244,13 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
         return
 
     ReplyController.set_replying(group_id, True)
+    # 累加连续互回次数：换了人会自动归零
+    streak = ReplyController.bump_streak(group_id, user_id)
+    if config.max_reply_streak > 0 and streak > 1:
+        logger.debug(
+            f"Reply streak for {user_name}({user_id}) in group {group_id}: "
+            f"{streak}/{config.max_reply_streak}"
+        )
     try:
         await asyncio.wait_for(
             _reply_flow(bot, event, group_id, user_id, user_name, images_b64, segments, record_time, is_at, config),

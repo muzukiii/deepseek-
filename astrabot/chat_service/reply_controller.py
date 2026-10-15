@@ -13,6 +13,10 @@ class ReplyController:
     _reply_status: dict[int, bool] = {}
     _pending_at: dict[int, list[dict]] = {}  # 回复期间被 @ 的排队消息
     _recalled_messages: set[tuple[int, int]] = set()  # 已撤回的 (group_id, message_id)
+    # 连续互回计数: group_id -> {"user_id": str, "streak": int}
+    # 用于防止两个机器人（或两个话痨）无限互相回复。
+    _streak: dict[int, dict] = {}
+
     @classmethod
     def get_lock(cls, group_id: int) -> asyncio.Lock:
         if group_id not in cls._locks:
@@ -26,6 +30,32 @@ class ReplyController:
     @classmethod
     def set_replying(cls, group_id: int, status: bool):
         cls._reply_status[group_id] = status
+
+    @classmethod
+    def bump_streak(cls, group_id: int, user_id: str) -> int:
+        """记录一次回复，返回该用户的连续被回次数。
+
+        同一个用户连续发言则累加；换了人（例如真人插话）立即归零重计。
+        """
+        state = cls._streak.get(group_id)
+        if state and state.get("user_id") == str(user_id):
+            state["streak"] = state.get("streak", 0) + 1
+        else:
+            state = {"user_id": str(user_id), "streak": 1}
+            cls._streak[group_id] = state
+        return state["streak"]
+
+    @classmethod
+    def peek_streak(cls, group_id: int, user_id: str) -> int:
+        """查看当前连续次数，不修改。"""
+        state = cls._streak.get(group_id)
+        if state and state.get("user_id") == str(user_id):
+            return state.get("streak", 0)
+        return 0
+
+    @classmethod
+    def reset_streak(cls, group_id: int):
+        cls._streak.pop(group_id, None)
 
     @classmethod
     def add_pending_at(cls, group_id: int, info: dict):
