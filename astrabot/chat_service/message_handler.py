@@ -18,6 +18,7 @@ from astrabot.chat_service.history_manager import (
     get_recent_messages,
     select_context,
     trim_history,
+    set_image_descriptions,
 )
 from astrabot.chat_service.fact_extractor import extract_and_store
 from astrabot.chat_service.image_utils import download_image_base64
@@ -162,10 +163,11 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
             b64 = await download_image_base64(url) if url else None
             if b64:
                 images_b64.append(b64)
-            # 历史里只留占位标记：base64 图片动辄十几 MB，存进数据库会
-            # 让 history.db 迅速膨胀（实测已达 860MB，其中 97% 是图片）。
-            # 图片仅在当轮识别时使用，识别完即丢弃。
-            segments.append({"type": "image"})
+            # 历史里只留 URL 与（识别后回填的）描述：base64 图片动辄
+            # 十几 MB，存进数据库会让 history.db 迅速膨胀（实测曾达
+            # 860MB，其中 97% 是图片）。URL 很小，且能据此重新下载，
+            # 因此既控制了体积，又保留了后续识别的能力。
+            segments.append({"type": "image", "url": url})
 
     record = {
         "time": record_time,
@@ -458,17 +460,39 @@ async def _reply_flow(
 
     history_image_map = _collect_images_from_history(history, max_images=3)
     if history_image_map:
-        # 分析历史消息中的图片，将 AI 描述注入到格式化的历史中
-        all_b64 = [b64 for _, _, b64 in history_image_map]
+        # 历史里只存了 URL，识别时按需重新下载（base64 不落库以免撑爆数据库）
+        all_b64: list[str] = []
+        for _, _, url in history_image_map:
+            got = await download_image_base64(url)
+            if got:
+                all_b64.append(got)
         ctx = "".join(
             f"{m.get('user_name','?')}：{m.get('message','')}\n"
             for m in history[-3:]
         )
         analysis_prompt = build_image_analysis_prompt(config.image_analyzer, ctx)
-        analysis_result = await analyze_images(all_b64, analysis_prompt)
+        analysis_result = await analyze_images(all_b64, analysis_prompt) if all_b64 else {}
         history_image_descs: dict[tuple[int, int], str] = {}
+        desc_by_pos: dict[tuple[int, int], str] = {}
         for (msg_idx, seg_idx, _), (_, desc) in zip(history_image_map, sorted(analysis_result.items())):
             history_image_descs[(msg_idx, seg_idx)] = desc
+            desc_by_pos[(msg_idx, seg_idx)] = desc
+
+        # 把描述回写到历史记录，之后同一张图不必重复识别（省钱且更快）
+        if desc_by_pos:
+            try:
+                updates: dict[int, dict] = {}
+                for (msg_idx, seg_idx), desc in desc_by_pos.items():
+                    if msg_idx >= len(history):
+                        continue
+                    mid = history[msg_idx].get("message_id")
+                    if mid:
+                        updates.setdefault(int(mid), {})[seg_idx] = desc
+                saved = await set_image_descriptions(group_id, updates)
+                if saved:
+                    logger.debug(f"Persisted image descriptions for {saved} message(s)")
+            except Exception as e:
+                logger.debug(f"Failed to persist image descriptions: {e}")
 
         # 顺手把刚识别过的图存进本地表情库：复用已有的图片与描述，
         # 不额外调用 API，因此不产生花费。
@@ -750,21 +774,36 @@ async def _ai_call_with_search(
 
 
 def _collect_images_from_history(history: list[dict], max_images: int = 3) -> list[tuple[int, int, str]]:
-    """从历史消息中倒序收集最近的图片，返回 (消息索引, 段索引, base64) 列表"""
+    """从历史消息中倒序收集最近「尚未识别」的图片。
+
+    注意：图片 base64 已不再落库（曾导致 history.db 涨到 860MB），
+    因此这里只能拿到段里保存的 URL。返回值第三项是该图的 URL，
+    没有 URL 的段落跳过。
+    """
     result: list[tuple[int, int, str]] = []
-    # 从新到旧遍历消息，从新到旧遍历每条消息的段，收集最近的图片
     for msg_idx in range(len(history) - 1, -1, -1):
         segs = history[msg_idx].get("segments") or []
         for seg_idx in range(len(segs) - 1, -1, -1):
             seg = segs[seg_idx]
-            if seg.get("type") == "image" and seg.get("b64"):
-                if len(result) >= max_images:
-                    break
-                result.append((msg_idx, seg_idx, seg["b64"]))
+            if seg.get("type") != "image":
+                continue
+            # 已经有描述的不必重复识别
+            if seg.get("desc"):
+                continue
+            url = seg.get("url") or ""
+            if url:
+                result.append((msg_idx, seg_idx, url))
+            if len(result) >= max_images:
+                break
         if len(result) >= max_images:
             break
     result.reverse()  # 翻转为从旧到新，保持时间顺序
     return result
+
+
+def _collect_undescribed_images(history: list[dict], max_images: int = 3) -> list[tuple[int, int, str]]:
+    """收集历史中已存 URL 但没有描述的图片，返回 (msg_idx, seg_idx, url)。"""
+    return _collect_images_from_history(history, max_images=max_images)
 
 
 _mute_cache: dict[int, tuple[bool, float]] = {}

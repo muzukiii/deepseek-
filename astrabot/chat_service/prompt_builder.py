@@ -142,7 +142,9 @@ def format_history(
                     else:
                         parts.append(f"@{qq}")
                 elif seg["type"] == "image":
-                    desc = history_image_descs.get((msg_idx, seg_idx), "")
+                    # 优先用段落里已持久化的描述（下次对话可直接复用），
+                    # 否则用本轮刚识别出的结果
+                    desc = seg.get("desc") or history_image_descs.get((msg_idx, seg_idx), "")
                     if desc:
                         parts.append(f"[图片：{desc}]")
                     else:

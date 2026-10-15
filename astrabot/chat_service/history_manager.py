@@ -78,6 +78,47 @@ async def append_message(group_id: int, record: dict):
     conn.commit()
 
 
+async def set_image_descriptions(group_id: int, updates: dict[int, dict]) -> int:
+    """按 message_id 回写图片描述。
+
+    updates: {message_id: {"seg_idx": desc, ...}}
+    图片 base64 不落库，但描述很小且有长期价值，存下来后同一张图
+    不必重复识别。返回实际更新的行数。
+    """
+    if not updates:
+        return 0
+    conn = _get_db()
+    changed = 0
+    for message_id, seg_descs in updates.items():
+        row = conn.execute(
+            "SELECT id, segments FROM messages WHERE group_id = ? AND message_id = ?",
+            (group_id, message_id),
+        ).fetchone()
+        if not row or not row["segments"]:
+            continue
+        try:
+            segs = json.loads(row["segments"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(segs, list):
+            continue
+        touched = False
+        for seg_idx, desc in seg_descs.items():
+            if 0 <= seg_idx < len(segs) and isinstance(segs[seg_idx], dict):
+                if segs[seg_idx].get("type") == "image":
+                    segs[seg_idx]["desc"] = desc
+                    touched = True
+        if touched:
+            conn.execute(
+                "UPDATE messages SET segments = ? WHERE id = ?",
+                (json.dumps(segs, ensure_ascii=False), row["id"]),
+            )
+            changed += 1
+    if changed:
+        conn.commit()
+    return changed
+
+
 async def get_recent_messages(group_id: int, count: int = 15) -> list[dict]:
     conn = _get_db()
     conn.row_factory = sqlite3.Row
