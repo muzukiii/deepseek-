@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Literal
 
 from astrabot.chat_service.ai_client import chat
+from astrabot.config import get_config
 from astrabot.logmanager.logger import logger
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
@@ -93,34 +94,41 @@ async def extract_facts_from_conversation(
 ) -> list[str]:
     """从对话中提取事实，返回提取的事实列表"""
     try:
-        prompt = f"""从以下对话中提取值得记住的事实信息。
+        prompt = f"""从以下对话中提取值得长期记住的事实。
 
 对话：
 {user_name}: {user_msg[:500]}
 AI: {ai_reply[:500]}
 
 提取规则：
-1. 只提取稳定的、有价值的信息：
-   - 个人偏好、习惯、性格
-   - 重要事件、约定
-   - 个人背景、技能
-   - 群内规则、共识
-2. 不提取：
-   - 随口说的话、玩笑
-   - 情绪化表达
-   - 日常寒暄
-3. 每条事实用一句话表述，包含主语
-4. 如果没有值得记录的，返回空数组
+1. 只提取"以后还用得上"的稳定信息：
+   - 用户的个人偏好、习惯、性格特点
+   - 用户的个人背景、技能、身份
+   - 明确的约定或计划
+   - 群内的长期规则、共识
+2. 绝对不要提取：
+   - 本次对话发生了什么（例如"某人问了X，小池回应了Y"）
+   - 小池自己的回复内容或立场
+   - 随口说的话、玩笑、情绪化表达、日常寒暄
+3. 每条一句话，必须包含主语（谁的信息）。
+4. 宁缺毋滥：大多数对话都提取不出东西。没有值得记录的返回 []。
+
+判断标准：这条信息一周后再看，还有用吗？没用就不要记。
 
 输出格式：纯 JSON 数组
 ["事实1", "事实2"]"""
 
         messages = [{"role": "user", "content": prompt}]
+        # 事实提取复用主 API：原先写死 provider="MINIMAX" 且参数名有误
+        # （chat() 接受的是 protocol），导致该功能从未真正生效。
+        config = get_config()
         result = await chat(
-            provider="MINIMAX",
-            model="MiniMax-M2.7",
+            protocol=config.API_PROTOCOL,
+            base_url=config.API_BASE_URL,
+            api_key=config.API_KEY,
+            model=config.API_MODEL,
             messages=messages,
-            timeout=15,
+            timeout=30,
         )
 
         content = result.get("content", "").strip()
