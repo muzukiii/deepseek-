@@ -49,7 +49,7 @@ from astrabot.chat_service.prompt_builder import (
 )
 from astrabot.chat_service.reply_controller import ReplyController, should_reply
 from astrabot.chat_service.search_engine import run_search
-from astrabot.chat_service.sticker_gallery import sticker_url
+from astrabot.chat_service.sticker_gallery import resolve_sticker
 from astrabot.config import get_config
 from astrabot.logmanager.logger import logger
 
@@ -409,6 +409,23 @@ async def _reply_flow(
         history_image_descs: dict[tuple[int, int], str] = {}
         for (msg_idx, seg_idx, _), (_, desc) in zip(history_image_map, sorted(analysis_result.items())):
             history_image_descs[(msg_idx, seg_idx)] = desc
+
+        # 顺手把刚识别过的图存进本地表情库：复用已有的图片与描述，
+        # 不额外调用 API，因此不产生花费。
+        if config.sticker_enabled and config.sticker_autosave:
+            try:
+                from astrabot.chat_service import sticker_store
+
+                for (_, _, b64), (_, desc) in zip(
+                    history_image_map, sorted(analysis_result.items())
+                ):
+                    raw = sticker_store.image_b64_to_bytes(b64)
+                    if raw and desc:
+                        sticker_store.save_sticker(
+                            raw, desc, max_count=config.sticker_max_count
+                        )
+            except Exception as e:
+                logger.debug(f"Sticker autosave skipped: {e}")
     else:
         history_image_descs = {}
 
@@ -493,6 +510,26 @@ async def _reply_flow(
         inject_parts = [part for part in [pre_prompt, append_prompt] if part]
         if inject_parts:
             main_prompt += "\n\n" + "\n\n".join(inject_parts)
+
+        # 注入本地表情目录，让模型知道可以发表情（此前只有私聊做了这件事）
+        if config.sticker_enabled and config.sticker_catalog_size > 0:
+            try:
+                from astrabot.chat_service.sticker_gallery import (
+                    sticker_prompt_catalog,
+                )
+
+                catalog = await sticker_prompt_catalog(
+                    limit=config.sticker_catalog_size
+                )
+                if catalog:
+                    main_prompt += (
+                        "\n\n可选表情图片目录（仅在语境明显适合时挑一张，"
+                        "在 JSON 里用 sticker_id 给出它的 id；"
+                        "不需要或没有合适的就填 null，不要强行发表情）：\n"
+                        + catalog
+                    )
+            except Exception as e:
+                logger.debug(f"Sticker catalog skipped: {e}")
 
     if re_exec_append:
         # re_exec 插件要求：将插件输出注入历史后，获取执行期间新消息，让 AI 重新构思
@@ -776,11 +813,14 @@ async def _send_reply(
         segments.insert(0, MessageSegment.reply(event.message_id))
 
     message = segments[0] if len(segments) == 1 else segments
-    image_url = await sticker_url((reply_json or {}).get("sticker_id"))
+    image_url = await resolve_sticker((reply_json or {}).get("sticker_id"))
     if image_url:
         if not isinstance(message, list):
             message = [message]
-        message.append(MessageSegment.image(image_url))
+        try:
+            message.append(MessageSegment.image(image_url))
+        except Exception as e:
+            logger.warning(f"Failed to attach sticker {image_url}: {e}")
     await bot.send_group_msg(group_id=group_id, message=message)
 
     if record_reply:

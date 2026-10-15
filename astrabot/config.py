@@ -86,6 +86,12 @@ class Config:
     # 留空表示不限制（任何人都能用）。
     command_allowed_users: set[str] = field(default_factory=set)
 
+    # 本地表情包库：把群里出现过的图片识别后存到本地，供之后按需发送
+    sticker_enabled: bool = True
+    sticker_autosave: bool = True
+    sticker_max_count: int = 200
+    sticker_catalog_size: int = 20
+
     # 四种回复概率，分别对应：普通消息 / @触发 / 回复中继续搭话 / 回复中被@插入
     reply_rate: float = 0.1
     reply_rate_at: float = 1.0
@@ -216,6 +222,11 @@ class Config:
                     x.strip() for x in str(allowed_raw).split(",") if x.strip()
                 }
 
+        sticker_enabled = _bool_env("sticker_enabled", True)
+        sticker_autosave = _bool_env("sticker_autosave", True)
+        sticker_max_count = _int_env("sticker_max_count", 200, 0, 5000)
+        sticker_catalog_size = _int_env("sticker_catalog_size", 20, 0, 100)
+
         return cls(
             name=raw["name"],
             name_cn=raw["name_cn"],
@@ -223,6 +234,10 @@ class Config:
             enabled_groups=enabled_groups,
             keyword=keyword,
             command_allowed_users=allowed_users,
+            sticker_enabled=sticker_enabled,
+            sticker_autosave=sticker_autosave,
+            sticker_max_count=sticker_max_count,
+            sticker_catalog_size=sticker_catalog_size,
             quote_reply=quote_reply,
             history_messages=history_messages,
             memory_facts=memory_facts,
