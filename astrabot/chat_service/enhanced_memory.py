@@ -254,21 +254,76 @@ def search_relevant_facts(
     return results
 
 
-def get_recent_facts(group_id: int, limit: int = 10) -> list[dict]:
-    """获取最近的事实记忆"""
+def get_recent_facts(
+    group_id: int,
+    limit: int = 10,
+    priority_user_ids: set[str] | None = None,
+    priority_ratio: float = 0.7,
+) -> list[dict]:
+    """获取事实记忆，优先返回与当前对话对象相关的条目。
+
+    机器人在群里通常是回应某个人，而群记忆是整个群共享的。如果不加
+    区分，回复 A 时可能被 B、C、D 的各种事实带偏。因此这里做两层取样：
+
+    1) 先取属于 priority_user_ids（当前发言者、被 @ 的人、被回复的人）
+       的事实，占 limit 的 priority_ratio；
+    2) 剩余名额再用群体的近期事实补齐，保留群氛围与共同背景。
+
+    priority_user_ids 为空时退化为原来的「按时间取最近」行为。
+    """
     conn = _get_db()
     conn.row_factory = sqlite3.Row
 
-    cur = conn.execute(
-        """SELECT id, fact, user_id, created_at, access_count, importance
-           FROM facts
-           WHERE group_id = ?
-           ORDER BY created_at DESC
-           LIMIT ?""",
-        (group_id, limit),
-    )
+    selected: list[dict] = []
+    seen: set[int] = set()
+    # 记录前多少条属于「当前对话对象」，排序时要保证它们不被挤掉
+    priority_count = 0
 
-    return [dict(row) for row in cur.fetchall()]
+    uids = {str(u) for u in (priority_user_ids or set()) if str(u).strip()}
+    if uids and limit > 0 and priority_ratio > 0:
+        quota = max(1, int(limit * max(0.0, min(1.0, priority_ratio))))
+        placeholders = ",".join("?" for _ in uids)
+        cur = conn.execute(
+            f"""SELECT id, fact, user_id, created_at, access_count, importance
+                FROM facts
+                WHERE group_id = ? AND user_id IN ({placeholders})
+                ORDER BY created_at DESC
+                LIMIT ?""",
+            (group_id, *uids, quota),
+        )
+        for row in cur.fetchall():
+            selected.append(dict(row))
+            seen.add(row["id"])
+        priority_count = len(selected)
+
+    # 用群体事实补足剩余名额
+    remaining = limit - len(selected)
+    if remaining > 0:
+        cur = conn.execute(
+            """SELECT id, fact, user_id, created_at, access_count, importance
+               FROM facts
+               WHERE group_id = ?
+               ORDER BY created_at DESC
+               LIMIT ?""",
+            (group_id, remaining + len(seen)),
+        )
+        for row in cur.fetchall():
+            if row["id"] in seen:
+                continue
+            selected.append(dict(row))
+            seen.add(row["id"])
+            if len(selected) >= limit:
+                break
+
+    # 排序：优先组的条目必须留在前面，否则后面按时间截断时会被挤掉
+    # （对话对象的事实通常较早，纯按时间排序正好会把它排到最后）。
+    priority_ids = {f["id"] for f in selected[:priority_count]}
+    priority_list = [f for f in selected if f["id"] in priority_ids]
+    other_list = [f for f in selected if f["id"] not in priority_ids]
+    priority_list.sort(key=lambda f: f.get("created_at", 0), reverse=True)
+    other_list.sort(key=lambda f: f.get("created_at", 0), reverse=True)
+
+    return (priority_list + other_list)[:limit]
 
 
 def delete_fact(group_id: int, fact_id: int) -> bool:
@@ -406,8 +461,14 @@ def build_memory_context(
     relevant_user_ids: set[str],
     max_facts: int = 6,
     max_long_term: int = 12,
+    priority_user_ids: set[str] | None = None,
+    priority_ratio: float = 0.7,
 ) -> dict[str, str]:
-    """构建记忆上下文，返回各部分记忆文本"""
+    """构建记忆上下文，返回各部分记忆文本
+
+    priority_user_ids 用于把事实记忆的注意力集中在当前对话对象身上
+    （通常是发言人 / 被 @ 的人 / 被回复的人），避免被其他群成员的信息带偏。
+    """
 
     ltm = get_long_term_memories(group_id, limit=max_long_term)
     ltm_text = "\n".join(
@@ -416,8 +477,13 @@ def build_memory_context(
         for i, m in enumerate(ltm)
     ) if ltm else ""
 
-    # 中期记忆：取最近的事实（数量可配，过多会挤占真实对话的注意力）
-    recent_facts = get_recent_facts(group_id, limit=max_facts)
+    # 中期记忆：优先取当前对话对象的事实，其余名额用群体事实补齐
+    recent_facts = get_recent_facts(
+        group_id,
+        limit=max_facts,
+        priority_user_ids=priority_user_ids,
+        priority_ratio=priority_ratio,
+    )
     facts_text = "\n".join(
         f"- [{datetime.fromtimestamp(f['created_at']).strftime('%m-%d %H:%M')}] "
         f"{_strip_ts(f['fact'])}"

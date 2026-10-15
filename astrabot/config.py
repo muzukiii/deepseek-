@@ -70,6 +70,9 @@ class Config:
     history_messages: int = 25
     memory_facts: int = 6
     long_term_memories: int = 12
+    # 事实记忆中，属于当前对话对象的名额占比（其余用群体记忆补齐）。
+    # 1.0 = 只看对话对象，0.0 = 完全不区分（旧行为）
+    memory_priority_ratio: float = 0.7
 
     # 识图：默认复用主 API（DeepSeek 多模态），无需额外 Key。
     # 单张图 token 有硬上限（≤1024），成本很低，但仍限制单次图片数量，
@@ -204,6 +207,14 @@ class Config:
         history_messages = _int_env("history_messages", 25, 5, 100)
         memory_facts = _int_env("memory_facts", 6, 0, 30)
         long_term_memories = _int_env("long_term_memories", 12, 0, 100)
+
+        try:
+            memory_priority_ratio = float(
+                str(raw.get("memory_priority_ratio", 0.7)).strip()
+            )
+        except (ValueError, TypeError):
+            memory_priority_ratio = 0.7
+        memory_priority_ratio = max(0.0, min(1.0, memory_priority_ratio))
         vision_max_images = _int_env("vision_max_images", 3, 1, 20)
 
         vision_provider = str(raw.get("vision_provider", "MAIN")).strip().upper() or "MAIN"
@@ -290,6 +301,7 @@ class Config:
             history_messages=history_messages,
             memory_facts=memory_facts,
             long_term_memories=long_term_memories,
+            memory_priority_ratio=memory_priority_ratio,
             poke_reply=poke_reply,
             poke_back=poke_back,
             vision_provider=vision_provider,
