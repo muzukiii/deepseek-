@@ -223,17 +223,26 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
         logger.info(f"Bot is muted in group {group_id}, skipping reply")
         return
 
-    # 连续互回限制：同一人已被连续回复 max_reply_streak 次就停下，
-    # 等其他人插话（换人即归零）。这是兜底，防止任何形式的对话死循环。
+    # 连续互回限制：同一人已被连续回复 max_reply_streak 次就停下。
+    # 恢复方式有两种，任一满足即可：
+    #   1) 别人插话 —— 换人即归零
+    #   2) 冷却期满 —— 默认 5 分钟，避免没人说话时永久卡住
     if config.max_reply_streak > 0:
         streak = ReplyController.peek_streak(group_id, user_id)
         if streak >= config.max_reply_streak:
+            cooldown = config.reply_streak_cooldown
+            if ReplyController.is_cooling_down(group_id, user_id, cooldown):
+                left = ReplyController.cooldown_left(group_id, cooldown)
+                logger.info(
+                    f"Skipped reply to {user_name}({user_id}) in group {group_id}: "
+                    f"reply streak reached {streak}/{config.max_reply_streak}, "
+                    f"cooldown {left}s left."
+                )
+                return
             logger.info(
-                f"Skipped reply to {user_name}({user_id}) in group {group_id}: "
-                f"reply streak reached {streak}/{config.max_reply_streak}. "
-                f"Waiting for someone else to speak."
+                f"Reply streak cooldown for {user_name}({user_id}) in group "
+                f"{group_id} expired; resuming."
             )
-            return
 
     lock = ReplyController.get_lock(group_id)
     if lock.locked():
@@ -256,11 +265,20 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     ReplyController.set_replying(group_id, True)
     # 累加连续互回次数：换了人会自动归零
     streak = ReplyController.bump_streak(group_id, user_id)
-    if config.max_reply_streak > 0 and streak > 1:
-        logger.debug(
-            f"Reply streak for {user_name}({user_id}) in group {group_id}: "
-            f"{streak}/{config.max_reply_streak}"
-        )
+    if config.max_reply_streak > 0:
+        if streak >= config.max_reply_streak:
+            # 刚到上限，启动冷却计时；期满即恢复
+            ReplyController.set_blocked(group_id)
+            logger.info(
+                f"Reply streak for {user_name}({user_id}) in group {group_id} "
+                f"reached {streak}/{config.max_reply_streak}; cooling down for "
+                f"{int(config.reply_streak_cooldown)}s"
+            )
+        elif streak > 1:
+            logger.debug(
+                f"Reply streak for {user_name}({user_id}) in group {group_id}: "
+                f"{streak}/{config.max_reply_streak}"
+            )
     try:
         await asyncio.wait_for(
             _reply_flow(bot, event, group_id, user_id, user_name, images_b64, segments, record_time, is_at, config),

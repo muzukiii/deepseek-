@@ -98,6 +98,8 @@ class Config:
     # 同一人连续被回复的上限，超过则停止；0 表示不限制。
     # 用于兜底：即便出现未知的循环，也会在若干轮后自动停下。
     max_reply_streak: int = 3
+    # 达到上限后的冷却秒数，期满自动恢复（0 = 只靠别人插话恢复）
+    reply_streak_cooldown: int = 300
 
     # 生气冷落：模型判定被某人惹到时，短暂无视对方（默认 10 分钟）
     mood_enabled: bool = True
@@ -241,6 +243,7 @@ class Config:
         sticker_catalog_size = _int_env("sticker_catalog_size", 20, 0, 100)
 
         max_reply_streak = _int_env("max_reply_streak", 3, 0, 50)
+        reply_streak_cooldown = _int_env("reply_streak_cooldown", 300, 0, 86400)
         mood_enabled = _bool_env("mood_enabled", True)
         mood_angry_seconds = _int_env("mood_angry_seconds", 600, 30, 86400)
         mood_ignore_at = _bool_env("mood_ignore_at", True)
@@ -275,6 +278,7 @@ class Config:
             command_allowed_users=allowed_users,
             ignore_users=ignore_users,
             max_reply_streak=max_reply_streak,
+            reply_streak_cooldown=reply_streak_cooldown,
             mood_enabled=mood_enabled,
             mood_angry_seconds=mood_angry_seconds,
             mood_ignore_at=mood_ignore_at,

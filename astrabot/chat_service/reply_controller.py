@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 
 from astrabot.config import Config
 
@@ -13,8 +14,9 @@ class ReplyController:
     _reply_status: dict[int, bool] = {}
     _pending_at: dict[int, list[dict]] = {}  # 回复期间被 @ 的排队消息
     _recalled_messages: set[tuple[int, int]] = set()  # 已撤回的 (group_id, message_id)
-    # 连续互回计数: group_id -> {"user_id": str, "streak": int}
+    # 连续互回计数: group_id -> {"user_id": str, "streak": int, "blocked_at": float}
     # 用于防止两个机器人（或两个话痨）无限互相回复。
+    # 达到上限后进入冷却，冷却期满自动恢复；期间若有别人插话也立即恢复。
     _streak: dict[int, dict] = {}
 
     @classmethod
@@ -35,7 +37,8 @@ class ReplyController:
     def bump_streak(cls, group_id: int, user_id: str) -> int:
         """记录一次回复，返回该用户的连续被回次数。
 
-        同一个用户连续发言则累加；换了人（例如真人插话）立即归零重计。
+        同一个用户连续发言则累加；换了人（例如真人插话）立即归零重计，
+        这样只要有人插话就能打破僵局。
         """
         state = cls._streak.get(group_id)
         if state and state.get("user_id") == str(user_id):
@@ -47,11 +50,56 @@ class ReplyController:
 
     @classmethod
     def peek_streak(cls, group_id: int, user_id: str) -> int:
-        """查看当前连续次数，不修改。"""
+        """查看当前连续次数（不修改）。
+
+        若已达到上限且冷却时间已过，则视为 0 并顺手清除状态，
+        让同一个人沉默一阵后仍能重新开始对话，而不是永久被卡住。
+        """
         state = cls._streak.get(group_id)
-        if state and state.get("user_id") == str(user_id):
-            return state.get("streak", 0)
-        return 0
+        if not state or state.get("user_id") != str(user_id):
+            return 0
+        return state.get("streak", 0)
+
+    @classmethod
+    def set_blocked(cls, group_id: int):
+        """标记该群刚因连续互回而上限，开始计时冷却。"""
+        state = cls._streak.get(group_id)
+        if state:
+            state["blocked_at"] = time.time()
+
+    @classmethod
+    def is_cooling_down(cls, group_id: int, user_id: str, cooldown: float) -> bool:
+        """是否仍在上限冷却中。
+
+        cooldown <= 0 表示不启用冷却，返回 False。
+        """
+        if cooldown <= 0:
+            return False
+        state = cls._streak.get(group_id)
+        if not state or state.get("user_id") != str(user_id):
+            return False
+        blocked_at = state.get("blocked_at")
+        if not blocked_at:
+            return False
+        if time.time() - blocked_at < cooldown:
+            return True
+        # 冷却结束：清除计数，允许重新开始
+        cls._streak.pop(group_id, None)
+        return False
+
+    @classmethod
+    def cooldown_left(cls, group_id: int, cooldown: float) -> int:
+        """剩余冷却秒数，0 表示不在冷却中。"""
+        if cooldown <= 0:
+            return 0
+        state = cls._streak.get(group_id)
+        if not state:
+            return 0
+        blocked_at = state.get("blocked_at")
+        if not blocked_at:
+            return 0
+        left = int(cooldown - (time.time() - blocked_at))
+        return max(0, left)
 
     @classmethod
     def reset_streak(cls, group_id: int):
