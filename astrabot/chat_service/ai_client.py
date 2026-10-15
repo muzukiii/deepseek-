@@ -9,6 +9,7 @@ import anthropic
 import httpx
 from openai import AsyncOpenAI
 
+from astrabot.chat_service import usage_tracker
 from astrabot.chat_service.http_client import get_http_client
 from astrabot.config import get_config
 from astrabot.logmanager.logger import logger
@@ -62,6 +63,12 @@ async def chat(
             msg = response.choices[0].message
             content = msg.content or ""
             reasoning_content = getattr(msg, "reasoning_content", None)
+            usage = getattr(response, "usage", None)
+            usage_tracker.record(
+                kind="chat",
+                model=model,
+                usage=usage.model_dump() if usage is not None else None,
+            )
             return {"content": content, "reasoning": reasoning_content}
         finally:
             await http_client.aclose()
@@ -84,6 +91,16 @@ async def chat(
             for block in message.content:
                 if block.type == "text":
                     content += block.text
+            anth_usage = getattr(message, "usage", None)
+            if anth_usage is not None:
+                usage_tracker.record(
+                    kind="chat",
+                    model=model,
+                    usage={
+                        "prompt_tokens": getattr(anth_usage, "input_tokens", 0),
+                        "completion_tokens": getattr(anth_usage, "output_tokens", 0),
+                    },
+                )
             return {"content": content}
         finally:
             await http_client.aclose()
@@ -154,11 +171,11 @@ async def analyze_images(
         content = response.choices[0].message.content or "{}"
         result = json.loads(_clean_json(content))
         usage = getattr(response, "usage", None)
-        if usage:
-            logger.debug(
-                f"Image analysis ok: {len(images_base64)} image(s), "
-                f"prompt={usage.prompt_tokens} completion={usage.completion_tokens}"
-            )
+        usage_tracker.record(
+            kind="vision",
+            model=model,
+            usage=usage.model_dump() if usage is not None else None,
+        )
         return result
     except json.JSONDecodeError as e:
         logger.error(f"Image analysis returned non-JSON: {e}")

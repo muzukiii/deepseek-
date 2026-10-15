@@ -72,6 +72,22 @@ def handle_memory_command(
         return True, "\n".join(lines)
 
 
+    if message in ("/用量", "/usage", "/cost"):
+        from astrabot.chat_service.usage_tracker import summary
+
+        return True, summary()
+
+    if message in ("/用量 今日", "/usage today"):
+        from astrabot.chat_service.usage_tracker import summary
+
+        return True, summary(days=1)
+
+    if message in ("/用量 7天", "/usage 7d"):
+        from astrabot.chat_service.usage_tracker import summary
+
+        return True, summary(days=7)
+
+
     match = re.match(r'/memory\s+delete\s+(\d+)', message)
     if not match:
         match = re.match(r'/删除记忆\s+(\d+)', message)
