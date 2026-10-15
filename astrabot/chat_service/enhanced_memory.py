@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Literal
 
 from astrabot.chat_service.ai_client import chat
+from astrabot.chat_service.text_tokenizer import extract_keywords, term_list
 from astrabot.config import get_config
 from astrabot.logmanager.logger import logger
 
@@ -204,53 +205,77 @@ def add_fact(
 
 
 def _extract_keywords(text: str) -> str:
-    """提取关键词（简单实现，可以用 jieba 等分词库改进）"""
+    """提取关键词（供 LIKE 检索使用，空格分隔）。
 
-    text = re.sub('[，。！？、；：\u201c\u201d\u2018\u2019（）《》【】\\s]+', ' ', text)
-
-    words = text.split()
-
-    keywords = [w for w in words if len(w) >= 2]
-    return ' '.join(keywords[:10])
+    原先用 text.split() 切分，而中文没有空格，整句会被当成一个
+    "词"，导致关键词检索形同虚设。现改为走 text_tokenizer 的中文
+    bigram 分词。
+    """
+    return extract_keywords(text)
 
 
 def search_relevant_facts(
     group_id: int,
     query: str,
     limit: int = 5,
+    user_id: str | None = None,
 ) -> list[dict]:
-    """根据查询搜索相关的事实记忆"""
-    keywords = _extract_keywords(query)
-    if not keywords:
+    """按关键词检索与查询相关的事实记忆。
+
+    原实现只匹配 keywords 字段，且从未被任何地方调用（等于没有检索）。
+    现在同时匹配事实正文，并按「命中关键词数量」排序，让最相关的排前面。
+
+    user_id 非空时，该用户的事实会获得加权，避免被其他人的记忆盖过。
+    """
+    tokens = term_list(query, limit=12)
+    if not tokens:
         return []
 
     conn = _get_db()
     conn.row_factory = sqlite3.Row
 
-    # 对每个关键词做 LIKE 模糊匹配，OR 连接
-    keyword_list = keywords.split()
-    conditions = " OR ".join(["keywords LIKE ?" for _ in keyword_list])
-    params = [f"%{kw}%" for kw in keyword_list] + [group_id, limit]
+    # 每个词元分别匹配 keywords 与 fact 正文
+    clauses = []
+    params: list = []
+    for tok in tokens:
+        clauses.append("(keywords LIKE ? OR fact LIKE ?)")
+        params.extend([f"%{tok}%", f"%{tok}%"])
 
-    cur = conn.execute(
-        f"""SELECT id, fact, user_id, created_at, access_count, importance
-            FROM facts
-            WHERE ({conditions}) AND group_id = ?
-            ORDER BY importance DESC, access_count DESC, created_at DESC
-            LIMIT ?""",
-        params,
+    sql = (
+        "SELECT id, fact, user_id, keywords, created_at, access_count, importance "
+        "FROM facts WHERE group_id = ? AND (" + " OR ".join(clauses) + ")"
     )
+    params.insert(0, group_id)
 
-    results = []
-    for row in cur.fetchall():
-        results.append(dict(row))
-        # 每次检索命中就增加访问计数，实现"越常用越靠前"的排序
+    try:
+        rows = conn.execute(sql, params).fetchall()
+    except Exception as e:
+        logger.debug(f"search_relevant_facts failed: {e}")
+        return []
+
+    scored: list[tuple[int, float, dict]] = []
+    for row in rows:
+        haystack = f"{row['keywords'] or ''} {row['fact'] or ''}"
+        hits = sum(1 for tok in tokens if tok in haystack)
+        if hits == 0:
+            continue
+        # 命中数为主，importance 与访问次数为辅
+        score = hits * 10 + float(row["importance"] or 0) + min(row["access_count"] or 0, 5) * 0.1
+        if user_id and str(row["user_id"]) == str(user_id):
+            score += 5  # 与当前对话对象相关，优先
+        scored.append((hits, score, dict(row)))
+
+    scored.sort(key=lambda x: (-x[1], -x[2].get("created_at", 0)))
+    results = [item for _, _, item in scored[:limit]]
+
+    now = int(time.time())
+    for item in results:
         conn.execute(
             "UPDATE facts SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
-            (int(time.time()), row["id"]),
+            (now, item["id"]),
         )
-
-    conn.commit()
+    if results:
+        conn.commit()
     return results
 
 
@@ -259,17 +284,19 @@ def get_recent_facts(
     limit: int = 10,
     priority_user_ids: set[str] | None = None,
     priority_ratio: float = 0.7,
+    query: str = "",
 ) -> list[dict]:
-    """获取事实记忆，优先返回与当前对话对象相关的条目。
+    """获取事实记忆，优先返回与当前对话对象及当前话题相关的条目。
 
     机器人在群里通常是回应某个人，而群记忆是整个群共享的。如果不加
-    区分，回复 A 时可能被 B、C、D 的各种事实带偏。因此这里做两层取样：
+    区分，回复 A 时可能被 B、C、D 的各种事实带偏。取样分三层：
 
-    1) 先取属于 priority_user_ids（当前发言者、被 @ 的人、被回复的人）
-       的事实，占 limit 的 priority_ratio；
-    2) 剩余名额再用群体的近期事实补齐，保留群氛围与共同背景。
+    1) 与当前消息关键词相关的事实（无论属于谁）—— 保证"问什么答什么"；
+    2) 属于 priority_user_ids（当前发言者、被 @ / 被回复的人）的事实，
+       占 limit 的 priority_ratio；
+    3) 剩余名额用群体的近期事实补齐，保留群氛围与共同背景。
 
-    priority_user_ids 为空时退化为原来的「按时间取最近」行为。
+    query 为空时不启用第 1 层，行为与旧版一致。
     """
     conn = _get_db()
     conn.row_factory = sqlite3.Row
@@ -279,8 +306,23 @@ def get_recent_facts(
     # 记录前多少条属于「当前对话对象」，排序时要保证它们不被挤掉
     priority_count = 0
 
+    # 第 1 层：与当前话题相关的记忆，优先占位
+    if query and limit > 0:
+        relevant = search_relevant_facts(
+            group_id,
+            query,
+            limit=max(1, limit // 2),
+            user_id=next(iter(priority_user_ids), None) if priority_user_ids else None,
+        )
+        for item in relevant:
+            if item["id"] in seen:
+                continue
+            selected.append(item)
+            seen.add(item["id"])
+        priority_count = len(selected)
+
     uids = {str(u) for u in (priority_user_ids or set()) if str(u).strip()}
-    if uids and limit > 0 and priority_ratio > 0:
+    if uids and len(selected) < limit and priority_ratio > 0:
         quota = max(1, int(limit * max(0.0, min(1.0, priority_ratio))))
         placeholders = ",".join("?" for _ in uids)
         cur = conn.execute(
@@ -362,12 +404,53 @@ def add_long_term_memory(
         return False
 
 
-def get_long_term_memories(group_id: int, limit: int | None = None) -> list[dict]:
+def search_long_term_memories(
+    group_id: int,
+    query: str,
+    limit: int = 8,
+) -> list[dict]:
+    """按关键词检索长期记忆，返回按相关度排序的结果。"""
+    tokens = term_list(query, limit=12)
+    if not tokens:
+        return []
+
+    conn = _get_db()
+    conn.row_factory = sqlite3.Row
+    clauses = " OR ".join("content LIKE ?" for _ in tokens)
+    params = [group_id] + [f"%{tok}%" for tok in tokens]
+    try:
+        rows = conn.execute(
+            f"""SELECT id, content, created_at, created_by
+                FROM long_term_memories
+                WHERE group_id = ? AND ({clauses})""",
+            params,
+        ).fetchall()
+    except Exception as e:
+        logger.debug(f"search_long_term_memories failed: {e}")
+        return []
+
+    scored = []
+    for row in rows:
+        hits = sum(1 for tok in tokens if tok in (row["content"] or ""))
+        if hits:
+            scored.append((hits, dict(row)))
+    scored.sort(key=lambda x: (-x[0], -x[1].get("created_at", 0)))
+    return [item for _, item in scored[:limit]]
+
+
+def get_long_term_memories(
+    group_id: int,
+    limit: int | None = None,
+    query: str = "",
+) -> list[dict]:
     """获取长期记忆。
 
-    limit 为 None 时返回全部；否则只取最近 limit 条（按时间正序返回，
-    便于阅读）。长期记忆会无条件拼进每次请求，不限量会持续膨胀并挤占
-    真实对话的上下文预算。
+    limit 为 None 时返回全部；否则：
+    - 若给了 query，先取与当前话题相关的若干条，再用最近的记忆补齐，
+      这样积累的大量记忆都有机会被用到，而不是永远只用最新的几条；
+    - 没有 query 时退化为「取最近 limit 条」。
+
+    返回按时间正序，便于阅读。
     """
     conn = _get_db()
     conn.row_factory = sqlite3.Row
@@ -381,6 +464,34 @@ def get_long_term_memories(group_id: int, limit: int | None = None) -> list[dict
             (group_id,),
         )
         return [dict(row) for row in cur.fetchall()]
+
+    if query:
+        picked: list[dict] = []
+        seen: set[int] = set()
+        # 相关记忆占约一半名额
+        for item in search_long_term_memories(group_id, query, limit=max(1, limit // 2)):
+            picked.append(item)
+            seen.add(item["id"])
+        # 余下用最近的补齐
+        remaining = limit - len(picked)
+        if remaining > 0:
+            cur = conn.execute(
+                """SELECT id, content, created_at, created_by
+                   FROM long_term_memories
+                   WHERE group_id = ?
+                   ORDER BY created_at DESC
+                   LIMIT ?""",
+                (group_id, remaining + len(seen)),
+            )
+            for row in cur.fetchall():
+                if row["id"] in seen:
+                    continue
+                picked.append(dict(row))
+                seen.add(row["id"])
+                if len(picked) >= limit:
+                    break
+        picked.sort(key=lambda m: m.get("created_at", 0))
+        return picked[:limit]
 
     # 先按时间倒序取最近的 N 条，再翻转成正序
     cur = conn.execute(
@@ -470,19 +581,20 @@ def build_memory_context(
     （通常是发言人 / 被 @ 的人 / 被回复的人），避免被其他群成员的信息带偏。
     """
 
-    ltm = get_long_term_memories(group_id, limit=max_long_term)
+    ltm = get_long_term_memories(group_id, limit=max_long_term, query=current_message)
     ltm_text = "\n".join(
         f"{i+1}. [{datetime.fromtimestamp(m['created_at']).strftime('%m-%d %H:%M')}] "
         f"{_strip_ts(m['content'])}"
         for i, m in enumerate(ltm)
     ) if ltm else ""
 
-    # 中期记忆：优先取当前对话对象的事实，其余名额用群体事实补齐
+    # 中期记忆：先按当前话题检索相关事实，再按对话对象与群体补齐
     recent_facts = get_recent_facts(
         group_id,
         limit=max_facts,
         priority_user_ids=priority_user_ids,
         priority_ratio=priority_ratio,
+        query=current_message,
     )
     facts_text = "\n".join(
         f"- [{datetime.fromtimestamp(f['created_at']).strftime('%m-%d %H:%M')}] "

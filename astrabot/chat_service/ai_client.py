@@ -11,6 +11,7 @@ from openai import AsyncOpenAI
 
 from astrabot.chat_service import usage_tracker
 from astrabot.chat_service.http_client import get_http_client
+from astrabot.chat_service.image_utils import detect_mime
 from astrabot.config import get_config
 from astrabot.logmanager.logger import logger
 
@@ -108,17 +109,115 @@ async def chat(
     raise ValueError(f"Unknown protocol: {protocol}")
 
 
+def _read_dimensions(raw: bytes) -> tuple[int, int]:
+    """从文件头读出宽高，失败返回 (0, 0)。
+
+    只解析头部，不依赖 Pillow，避免再引入可能被系统策略拦截的原生库。
+    """
+    try:
+        if raw.startswith(b"\x89PNG\r\n\x1a\n") and len(raw) >= 24:
+            return int.from_bytes(raw[16:20], "big"), int.from_bytes(raw[20:24], "big")
+        if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+            # VP8X 扩展格式
+            if raw[12:16] == b"VP8X" and len(raw) >= 30:
+                w = int.from_bytes(raw[24:27], "little") + 1
+                h = int.from_bytes(raw[27:30], "little") + 1
+                return w, h
+        if raw.startswith(b"GIF"):
+            if len(raw) >= 10:
+                return (
+                    int.from_bytes(raw[6:8], "little"),
+                    int.from_bytes(raw[8:10], "little"),
+                )
+        if raw.startswith(b"\xff\xd8"):
+            # JPEG 需要逐段扫描 SOF 标记
+            i = 2
+            while i + 9 < len(raw):
+                if raw[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = raw[i + 1]
+                if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB):
+                    return (
+                        int.from_bytes(raw[i + 7 : i + 9], "big"),
+                        int.from_bytes(raw[i + 5 : i + 7], "big"),
+                    )
+                if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+                    i += 2
+                    continue
+                seg_len = int.from_bytes(raw[i + 2 : i + 4], "big")
+                i += 2 + seg_len
+    except Exception:
+        pass
+    return 0, 0
+
+
+def _needs_high_detail(b64: str) -> bool:
+    """判断这张图是否值得用 high 精度识别。
+
+    经验规则：
+    - 尺寸大（可能含大量细节/文字）-> high
+    - 长宽比悬殊（长截图/聊天记录）-> high
+    - 双轴都较小（表情包、头像）-> low，省 token
+    """
+    import base64 as _b64
+
+    try:
+        raw = _b64.b64decode(b64, validate=False)
+    except Exception:
+        return False
+    if not raw:
+        return False
+
+    # 体积大通常是截图或高清图，值得看清
+    if len(raw) > 400 * 1024:
+        return True
+
+    w, h = _read_dimensions(raw)
+    if not w or not h:
+        return False
+
+    ratio = max(w, h) / max(1, min(w, h))
+    long_side = max(w, h)
+
+    # 长截图 / 聊天记录截图
+    if ratio >= 2.0:
+        return True
+
+    # 高分辨率图：细节多，low 会被缩到 512 而丢信息
+    if long_side >= 800:
+        return True
+
+    # 尺寸小且接近方形：表情包、头像，low 足够
+    if long_side <= 400 and ratio <= 1.5:
+        return False
+
+    return False
+
+
 async def analyze_images(
     images_base64: list[str],
     prompt: str,
+    force_detail: str | None = None,
 ) -> dict:
     """识图：默认复用主 API（DeepSeek 多模态），也可切到独立视觉服务。
 
     DeepSeek 的图片按 token 计费且有硬上限（每张 ≤1024 token），
     因此识图成本极低，无需单独申请视觉 API Key。
+
+    detail 默认沿用配置，但会按图片特征自动升级：截图、含文字、
+    尺寸偏小或长宽比异常的图用 high，能显著提升 OCR 与细节准确度，
+    普通表情包仍用 low 以省 token。
     """
     config = get_config()
     provider = (config.VISUAL_API_PROVIDER or "").strip().upper()
+
+    # 按图片内容决定精度：配置为 auto 时启用自动判断
+    detail = config.vision_detail
+    if force_detail:
+        detail = force_detail
+    elif detail == "auto":
+        detail = "high" if any(_needs_high_detail(b) for b in images_base64) else "low"
 
     # 解析使用哪个服务：主 API 还是独立视觉 API
     use_main_api = provider in ("", "MAIN", "DEEPSEEK") or not config.VISUAL_API_KEY
@@ -149,13 +248,18 @@ async def analyze_images(
 
     content_parts = [{"type": "text", "text": prompt}]
     for b64 in images_base64:
+        try:
+            raw = base64.b64decode(b64, validate=False)
+        except Exception:
+            raw = b""
+        # 按真实格式构造 data URI：此前一律写 image/jpeg，
+        # 而群里常见 GIF/PNG，格式声明错误会影响识图质量。
+        mime = detect_mime(raw) if raw else "image/jpeg"
         content_parts.append({
             "type": "image_url",
-            # detail=low 会先把图缩到 512x512，token 更省；
-            # 需要看清细节时可在 .env 里改成 high/original。
             "image_url": {
-                "url": f"data:image/jpeg;base64,{b64}",
-                "detail": config.vision_detail,
+                "url": f"data:{mime};base64,{b64}",
+                "detail": detail,
             },
         })
 
