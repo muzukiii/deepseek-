@@ -12,7 +12,9 @@ dependencies = [
     "openai>=1.0.0",
     "anthropic>=0.40.0",
     "mcp[cli]>=1.0.0",
-    "orjson>=3.0.0",
+    # 不依赖 orjson：本项目与 nonebot2 均未使用它，仅 fastapi 将其作为
+    # 可选的 JSON 序列化加速项（缺失时自动降级到标准库）。
+    # 在本机它会被 Windows 智能应用控制拦截，导致启动直接失败。
 ]
 
 [build-system]
