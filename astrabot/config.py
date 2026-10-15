@@ -82,6 +82,10 @@ class Config:
     poke_reply: bool = True
     poke_back: bool = True
 
+    # 命令白名单：只有这些 QQ 可以使用 /用量、/memory 等斜杠命令。
+    # 留空表示不限制（任何人都能用）。
+    command_allowed_users: set[str] = field(default_factory=set)
+
     # 四种回复概率，分别对应：普通消息 / @触发 / 回复中继续搭话 / 回复中被@插入
     reply_rate: float = 0.1
     reply_rate_at: float = 1.0
@@ -193,12 +197,32 @@ class Config:
         poke_reply = _bool_env("poke_reply", True)
         poke_back = _bool_env("poke_back", True)
 
+        # 命令白名单：支持 command_allowed_users=[123,456] 或 123,456
+        allowed_raw = raw.get("command_allowed_users", "")
+        allowed_users: set[str] = set()
+        if allowed_raw:
+            try:
+                parsed = (
+                    ast.literal_eval(allowed_raw)
+                    if isinstance(allowed_raw, str) and allowed_raw.strip().startswith("[")
+                    else str(allowed_raw).split(",")
+                )
+                if isinstance(parsed, (list, tuple, set)):
+                    allowed_users = {str(x).strip() for x in parsed if str(x).strip()}
+                else:
+                    allowed_users = {str(parsed).strip()}
+            except (ValueError, SyntaxError):
+                allowed_users = {
+                    x.strip() for x in str(allowed_raw).split(",") if x.strip()
+                }
+
         return cls(
             name=raw["name"],
             name_cn=raw["name_cn"],
             person_setting=raw["person_setting"],
             enabled_groups=enabled_groups,
             keyword=keyword,
+            command_allowed_users=allowed_users,
             quote_reply=quote_reply,
             history_messages=history_messages,
             memory_facts=memory_facts,

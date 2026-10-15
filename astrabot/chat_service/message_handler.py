@@ -176,8 +176,16 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     await append_message(group_id, record)
     await trim_history(group_id)
 
+    # 命令消息：交给命令处理器执行，不走 AI 回复流程。
+    # 原先一律 return 丢弃，导致 /用量、/memory 等命令从未生效。
     if plain_text.startswith("/"):
-        logger.debug(f"Command message ignored: {plain_text[:30]}")
+        handled, reply_text = _run_command(bot, group_id, user_id, plain_text, config)
+        if handled:
+            if reply_text:
+                await _send_reply(bot, event, group_id, reply_text)
+            return
+        # 未识别的命令同样不进入 AI 流程
+        logger.debug(f"Unknown command ignored: {plain_text[:30]}")
         return
 
     is_at = event.is_tome()
@@ -222,6 +230,28 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
         logger.error(f"Reply flow error for group {group_id}: {e}")
     finally:
         ReplyController.set_replying(group_id, False)
+
+
+def _run_command(bot, group_id: int, user_id: str, text: str, config):
+    """执行斜杠命令，返回 (是否已处理, 回复文本)。
+
+    只有白名单内的 QQ 才能使用命令；其他人即使发了也不会得到响应，
+    避免群友随意查看用量或增删记忆。
+    """
+    from astrabot.chat_service.memory_commands import handle_memory_command
+
+    allowed = config.command_allowed_users
+    if allowed and str(user_id) not in allowed:
+        logger.info(
+            f"Command '{text[:20]}' denied for {user_id} (not in whitelist)"
+        )
+        return True, ""
+
+    try:
+        return handle_memory_command(int(group_id), str(user_id), text)
+    except Exception as e:
+        logger.error(f"Command handler failed for '{text[:30]}': {e}")
+        return True, ""
 
 
 async def _extract_reply_context(bot: Bot, group_id: int, event: GroupMessageEvent, config) -> dict:
