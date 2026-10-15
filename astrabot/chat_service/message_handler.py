@@ -161,7 +161,10 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
             b64 = await download_image_base64(url) if url else None
             if b64:
                 images_b64.append(b64)
-            segments.append({"type": "image", "b64": b64})
+            # 历史里只留占位标记：base64 图片动辄十几 MB，存进数据库会
+            # 让 history.db 迅速膨胀（实测已达 860MB，其中 97% 是图片）。
+            # 图片仅在当轮识别时使用，识别完即丢弃。
+            segments.append({"type": "image"})
 
     record = {
         "time": record_time,
@@ -170,7 +173,8 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
         "user_name": user_name,
         "message": plain_text,
         "msg_type": "user",
-        "images": images_b64 or None,
+        # 同样不落库，只保留文本与图片占位
+        "images": None,
         "segments": segments,
     }
     await append_message(group_id, record)
