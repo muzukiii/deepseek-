@@ -21,6 +21,7 @@ from astrabot.chat_service.history_manager import (
 )
 from astrabot.chat_service.fact_extractor import extract_and_store
 from astrabot.chat_service.image_utils import download_image_base64
+from astrabot.chat_service import mood
 from astrabot.chat_service.memory_manager import (
     is_user_ignored,
     get_memories,
@@ -201,6 +202,15 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
         logger.info(
             f"Ignored message from {user_name}({user_id}) in group {group_id}: "
             f"user is in ignore_users"
+        )
+        return
+
+    # 生气冷落：模型此前判定被此人惹到，在有效期内无视对方的任何消息
+    if config.mood_enabled and mood.is_angry(group_id, user_id):
+        left = mood.remaining_seconds(group_id, user_id)
+        logger.info(
+            f"Ignored message from {user_name}({user_id}) in group {group_id}: "
+            f"still angry, {left}s left"
         )
         return
 
@@ -604,6 +614,21 @@ async def _reply_flow(
     ignore_even_at = reply_json.get("ignore_even_at")
     if ignoreing_reply or ignore_even_at:
         process_ignore_fields(group_id, ignoreing_reply, ignore_even_at)
+
+    # 生气：模型判定被对方惹到时，短暂冷落对方（默认 10 分钟），
+    # 期间无视其消息，到期自动恢复。
+    if config.mood_enabled:
+        angry = str(reply_json.get("angry", "") or "").strip().lower()
+        if angry in ("true", "1", "yes", "on"):
+            reason = str(reply_json.get("angry_reason", "") or "").strip()
+            secs = config.mood_angry_seconds
+            try:
+                raw_secs = reply_json.get("angry_seconds")
+                if raw_secs is not None:
+                    secs = max(30, min(int(float(raw_secs)), 24 * 3600))
+            except (TypeError, ValueError):
+                pass
+            mood.set_angry(group_id, user_id, seconds=secs, reason=reason)
 
     for _round in range(10):
         # 检查 AI 回复中是否包含插件调用字段，若有则执行插件并重新生成回复

@@ -99,6 +99,12 @@ class Config:
     # 用于兜底：即便出现未知的循环，也会在若干轮后自动停下。
     max_reply_streak: int = 3
 
+    # 生气冷落：模型判定被某人惹到时，短暂无视对方（默认 10 分钟）
+    mood_enabled: bool = True
+    mood_angry_seconds: int = 600
+    # 冷落期间是否连 @ 都不理。True 更"真性情"，False 则只在非 @ 时冷落。
+    mood_ignore_at: bool = True
+
     # 四种回复概率，分别对应：普通消息 / @触发 / 回复中继续搭话 / 回复中被@插入
     reply_rate: float = 0.1
     reply_rate_at: float = 1.0
@@ -235,6 +241,9 @@ class Config:
         sticker_catalog_size = _int_env("sticker_catalog_size", 20, 0, 100)
 
         max_reply_streak = _int_env("max_reply_streak", 3, 0, 50)
+        mood_enabled = _bool_env("mood_enabled", True)
+        mood_angry_seconds = _int_env("mood_angry_seconds", 600, 30, 86400)
+        mood_ignore_at = _bool_env("mood_ignore_at", True)
 
         # 忽略名单：支持 ignore_users=[123,456] 或 123,456
         ignore_raw = raw.get("ignore_users", "")
@@ -266,6 +275,9 @@ class Config:
             command_allowed_users=allowed_users,
             ignore_users=ignore_users,
             max_reply_streak=max_reply_streak,
+            mood_enabled=mood_enabled,
+            mood_angry_seconds=mood_angry_seconds,
+            mood_ignore_at=mood_ignore_at,
             sticker_enabled=sticker_enabled,
             sticker_autosave=sticker_autosave,
             sticker_max_count=sticker_max_count,
