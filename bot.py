@@ -104,5 +104,29 @@ nonebot.load_plugins("astrabot")
 
 _patch_uvicorn_server()
 
+
+def _network_selfcheck() -> None:
+    """启动时探测直连与代理，把结果写进日志。
+
+    之前排查"图片下载失败/AI 调用失败"时，无法快速判断是代理挂了
+    还是服务本身不可达，只能事后翻日志。这里提前给出结论。
+    """
+    try:
+        from astrabot.chat_service.http_client import probe_connectivity, use_proxy
+
+        results = asyncio.run(probe_connectivity())
+        mode = "代理" if use_proxy() else "直连"
+        logger.info(
+            f"网络自检: 当前模式={mode} "
+            f"直连={'可用' if results.get('direct') else '不可用'} "
+            f"代理={'可用' if results.get('proxy') else '不可用'}"
+        )
+        if not results.get("direct") and not results.get("proxy"):
+            logger.warning("网络自检: 直连与代理均不可用，请检查网络或代理设置")
+    except Exception as e:  # 自检失败不应影响启动
+        logger.debug(f"网络自检跳过: {e}")
+
+
 if __name__ == "__main__":
+    _network_selfcheck()
     nonebot.run()

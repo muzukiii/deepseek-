@@ -12,6 +12,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from openai import AsyncOpenAI
 
+from astrabot.chat_service.http_client import get_http_client, request_with_retry
 from astrabot.config import get_config
 from astrabot.logmanager.logger import logger
 
@@ -106,30 +107,25 @@ def _extract_text(html: str) -> str:
     return "\n".join(extractor.result)
 
 
-def _get_httpx_client(timeout: int = 15) -> httpx.AsyncClient:
-    """创建配置好代理的 httpx 客户端"""
-
-    proxy = os.environ.get("ALL_PROXY") or os.environ.get("all_proxy")
-    if proxy and proxy.startswith("socks://"):
-        proxy = proxy.replace("socks://", "socks5://", 1)
-
-    if proxy:
-        return httpx.AsyncClient(proxy=proxy, timeout=timeout)
-    return httpx.AsyncClient(timeout=timeout)
+def _get_httpx_client(timeout: int = 20) -> httpx.AsyncClient:
+    """创建统一的 httpx 客户端（默认直连，可用 .env 切换代理）。"""
+    return get_http_client(timeout=timeout)
 
 
 async def fetch_url(url: str) -> str:
-    client = _get_httpx_client(timeout=15)
     try:
-        resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        resp = await request_with_retry(
+            "GET",
+            url,
+            timeout=20,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
         resp.encoding = "utf-8"
         content = _extract_text(resp.text)
         return content[:8000]
     except Exception as e:
         logger.error(f"fetch_url failed {url}: {e}")
         return f"Failed to fetch URL: {e}"
-    finally:
-        await client.aclose()
 
 
 async def run_search(initial_query: str, context: str) -> dict:

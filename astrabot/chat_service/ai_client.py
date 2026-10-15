@@ -9,6 +9,7 @@ import anthropic
 import httpx
 from openai import AsyncOpenAI
 
+from astrabot.chat_service.http_client import get_http_client
 from astrabot.config import get_config
 from astrabot.logmanager.logger import logger
 
@@ -20,15 +21,8 @@ API_BASE_URLS = {
 
 
 def _get_httpx_client() -> httpx.AsyncClient:
-    """创建配置好代理的 httpx 客户端"""
-
-    proxy = os.environ.get("ALL_PROXY") or os.environ.get("all_proxy")
-    if proxy and proxy.startswith("socks://"):
-        proxy = proxy.replace("socks://", "socks5://", 1)
-
-    if proxy:
-        return httpx.AsyncClient(proxy=proxy, timeout=30.0)
-    return httpx.AsyncClient(timeout=30.0)
+    """创建统一的 httpx 客户端（默认直连，可用 .env 切换代理）。"""
+    return get_http_client(timeout=30.0)
 
 
 def _create_openai_client(base_url: str, api_key: str, http_client: httpx.AsyncClient) -> AsyncOpenAI:
