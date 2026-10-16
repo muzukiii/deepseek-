@@ -32,9 +32,23 @@ DEFAULT_MAX_COUNT = 200
 
 _lock = threading.RLock()
 
+# 索引内存缓存：按 index.json 的 mtime 惰性重载，避免每条消息都全量读盘。
+# _list_cache 缓存 all_stickers() 的物化结果（含逐项存在性校验），写时失效。
+_index_cache: dict | None = None
+_index_mtime: float = 0.0
+_list_cache: list[dict] | None = None
+_list_cache_mtime: float = -1.0
 
-def _load_index() -> dict:
-    """读取索引，损坏时安全回退为空索引。"""
+
+def _index_file_mtime() -> float:
+    try:
+        return INDEX_FILE.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _read_index_from_disk() -> dict:
+    """真正读盘解析，损坏时安全回退为空索引。"""
     if not INDEX_FILE.is_file():
         return {}
     try:
@@ -49,13 +63,32 @@ def _load_index() -> dict:
         return {}
 
 
+def _load_index() -> dict:
+    """返回索引字典；mtime 未变时用内存缓存，变了才重新读盘。
+
+    进程内写操作走 _save_index 会直接刷新缓存与 mtime，因此这里无需加锁；
+    单事件循环下这些函数都不含 await，调用是原子的。
+    """
+    global _index_cache, _index_mtime
+    m = _index_file_mtime()
+    if _index_cache is None or m != _index_mtime:
+        _index_cache = _read_index_from_disk()
+        _index_mtime = m
+    return _index_cache
+
+
 def _save_index(index: dict) -> None:
+    global _index_cache, _index_mtime, _list_cache
     with _lock:
         STICKER_DIR.mkdir(parents=True, exist_ok=True)
         tmp = INDEX_FILE.with_suffix(".tmp")
         with tmp.open("w", encoding="utf-8") as f:
             json.dump(index, f, ensure_ascii=False, indent=2)
         tmp.replace(INDEX_FILE)
+        # 写后立即以刚保存的字典为权威缓存，并让物化列表缓存失效
+        _index_cache = index
+        _index_mtime = _index_file_mtime()
+        _list_cache = None
 
 
 def _sha_id(raw: bytes) -> str:
@@ -150,13 +183,23 @@ def mark_used(sticker_id: str) -> None:
 
 
 def all_stickers() -> list[dict]:
-    index = _load_index()
-    out = []
-    for sid, meta in index.items():
-        path = STICKER_DIR / meta.get("file", "")
-        if path.is_file():
-            out.append({**meta, "id": sid, "path": path})
-    return out
+    """物化本地库条目列表；mtime 未变时命中缓存，避免每消息全量读盘+逐项 stat。
+
+    返回浅拷贝，防止调用方原地排序污染缓存；条目字典仍共享（catalog 只读字段）。
+    """
+    global _list_cache, _list_cache_mtime
+    with _lock:
+        index = _load_index()
+        if _list_cache is not None and _list_cache_mtime == _index_mtime:
+            return list(_list_cache)
+        out = []
+        for sid, meta in index.items():
+            path = STICKER_DIR / meta.get("file", "")
+            if path.is_file():
+                out.append({**meta, "id": sid, "path": path})
+        _list_cache = out
+        _list_cache_mtime = _index_mtime
+        return list(_list_cache)
 
 
 def catalog_for_prompt(limit: int = 20) -> str:
