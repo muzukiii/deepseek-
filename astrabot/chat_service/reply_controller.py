@@ -13,7 +13,11 @@ class ReplyController:
     _locks: dict[int, asyncio.Lock] = {}
     _reply_status: dict[int, bool] = {}
     _pending_at: dict[int, list[dict]] = {}  # 回复期间被 @ 的排队消息
-    _recalled_messages: set[tuple[int, int]] = set()  # 已撤回的 (group_id, message_id)
+    # 已撤回的 (group_id, message_id) -> 记录时间。撤回标记只需在该消息处理
+    # 在途的几秒内有效，故按 TTL + 容量上限淘汰，避免集合无限增长。
+    _recalled_messages: dict[tuple[int, int], float] = {}
+    _RECALLED_TTL = 300.0
+    _RECALLED_MAX = 5000
     # 连续互回计数: group_id -> {"user_id": str, "streak": int, "blocked_at": float}
     # 用于防止两个机器人（或两个话痨）无限互相回复。
     # 达到上限后进入冷却，冷却期满自动恢复；期间若有别人插话也立即恢复。
@@ -113,7 +117,20 @@ class ReplyController:
 
     @classmethod
     def add_recalled(cls, group_id: int, message_id: int):
-        cls._recalled_messages.add((group_id, message_id))
+        now = time.time()
+        cls._recalled_messages[(group_id, message_id)] = now
+        if len(cls._recalled_messages) > cls._RECALLED_MAX:
+            cls._prune_recalled(now)
+
+    @classmethod
+    def _prune_recalled(cls, now: float):
+        """先清过期项，仍超限则按插入顺序淘汰最旧（dict 保序）。"""
+        for k in [k for k, t in cls._recalled_messages.items() if now - t >= cls._RECALLED_TTL]:
+            cls._recalled_messages.pop(k, None)
+        excess = len(cls._recalled_messages) - cls._RECALLED_MAX
+        if excess > 0:
+            for k in list(cls._recalled_messages)[:excess]:
+                cls._recalled_messages.pop(k, None)
 
     @classmethod
     def is_recalled(cls, group_id: int, message_id: int) -> bool:

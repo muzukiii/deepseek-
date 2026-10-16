@@ -60,6 +60,23 @@ MAX_SEARCH_ROUNDS = 3
 # 群成员「昵称 -> QQ号」映射缓存：group_id -> (mapping, expire_at)
 _NAME_MAP_CACHE: dict[int, tuple[dict[str, int], float]] = {}
 _NAME_MAP_TTL = 600.0
+_NAME_MAP_MAX = 500
+_MUTE_CACHE_MAX = 500
+_MUTE_TTL = 30.0
+
+
+def _prune_ttl_cache(cache: dict, now: float, cap: int) -> None:
+    """约定 cache 值为 (payload, expire_at)：超过 cap 时先清过期项，
+    仍超限则按到期时间淘汰最旧者。只删缓存，命中失败会回源重取，不影响正确性。"""
+    if len(cache) <= cap:
+        return
+    for k in [k for k, v in cache.items() if v[1] <= now]:
+        cache.pop(k, None)
+    excess = len(cache) - cap
+    if excess > 0:
+        ordered = sorted(cache.items(), key=lambda kv: kv[1][1])
+        for k, _ in ordered[:excess]:
+            cache.pop(k, None)
 
 
 async def handle_group_message(bot: Bot, event: GroupMessageEvent):
@@ -837,7 +854,7 @@ async def _is_bot_muted(bot: Bot, group_id: int) -> bool:
     """检查机器人在群内是否被禁言，结果缓存 30 秒"""
     now = time.time()
     cached = _mute_cache.get(group_id)
-    if cached and now - cached[1] < 30:
+    if cached and cached[1] > now:
         return cached[0]
 
     try:
@@ -845,7 +862,8 @@ async def _is_bot_muted(bot: Bot, group_id: int) -> bool:
         info = await bot.get_group_member_info(group_id=group_id, user_id=self_id)
         shut_up = info.get("shut_up_timestamp", 0)
         muted = shut_up > now
-        _mute_cache[group_id] = (muted, now)
+        _mute_cache[group_id] = (muted, now + _MUTE_TTL)
+        _prune_ttl_cache(_mute_cache, now, _MUTE_CACHE_MAX)
         if muted:
             logger.info(f"Bot muted in group {group_id} until {shut_up}")
         return muted
@@ -910,6 +928,7 @@ async def _get_group_name_map(bot: Bot, group_id: int) -> dict[str, int]:
         return cached[0] if cached else {}
 
     _NAME_MAP_CACHE[group_id] = (mapping, now + _NAME_MAP_TTL)
+    _prune_ttl_cache(_NAME_MAP_CACHE, now, _NAME_MAP_MAX)
     return mapping
 
 
@@ -1022,8 +1041,5 @@ async def _get_user_display_name(bot: Bot, group_id: int, user_id: int) -> str:
         name = cached[0] if cached else str(user_id)
 
     _NAME_CACHE[key] = (name, now + _NAME_CACHE_TTL)
-    if len(_NAME_CACHE) > 2000:
-        # 简单的容量保护：丢弃已过期项
-        for k in [k for k, v in _NAME_CACHE.items() if v[1] <= now]:
-            _NAME_CACHE.pop(k, None)
+    _prune_ttl_cache(_NAME_CACHE, now, 2000)
     return name
