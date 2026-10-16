@@ -601,7 +601,6 @@ async def _reply_flow(
     memory_ctx = build_memory_context(
         group_id=group_id,
         current_message=plain_text,
-        relevant_user_ids=relevant_uids,
         max_facts=config.memory_facts,
         max_long_term=config.long_term_memories,
         # 发言人是本次回复的核心对象，其事实记忆优先；被 @ / 被回复的人次之。
