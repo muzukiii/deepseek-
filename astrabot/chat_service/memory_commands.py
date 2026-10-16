@@ -22,6 +22,25 @@ from astrabot.chat_service.enhanced_memory import (
 from astrabot.logmanager.logger import logger
 
 
+_DESTRUCTIVE_RES = (
+    re.compile(r"/memory\s+delete\s+\d+", re.IGNORECASE),
+    re.compile(r"/删除记忆\s+\d+", re.IGNORECASE),
+)
+
+
+def is_destructive_command(message: str) -> bool:
+    """判断是否为破坏性记忆操作（删条目 / 清空事实库）。
+
+    这类命令在没有配置白名单时必须 fail-safe 拒绝，避免任意群友
+    一键清空机器人的记忆。`/memory clear`（未带 confirm）只是回显
+    提示，不算破坏性。
+    """
+    m = message.strip()
+    if m == "/memory clear confirm":
+        return True
+    return any(p.search(m) for p in _DESTRUCTIVE_RES)
+
+
 def handle_memory_command(
     group_id: int,
     user_id: str,

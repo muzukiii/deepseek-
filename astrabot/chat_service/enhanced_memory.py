@@ -170,6 +170,15 @@ AI: {ai_reply[:500]}
         return []
 
 
+def _normalize(text: str) -> str:
+    """归一化记忆文本：把连续空白（空格/制表/换行）压成单个空格。
+
+    UNIQUE 约束只做精确去重，`喜欢  吃辣` 与 `喜欢 吃辣` 会被当成两条。
+    入库前统一压空白，让仅有空白差异的内容真正命中去重。
+    """
+    return " ".join(text.split())
+
+
 def add_fact(
     group_id: int,
     fact: str,
@@ -177,7 +186,7 @@ def add_fact(
     importance: int = 1,
 ) -> bool:
     """添加一条事实记忆"""
-    fact = fact.strip()
+    fact = _normalize(fact)
     if not fact:
         return False
 
@@ -387,7 +396,7 @@ def add_long_term_memory(
     created_by: str | None = None,
 ) -> bool:
     """添加长期记忆"""
-    content = content.strip()
+    content = _normalize(content)
     if not content:
         return False
 

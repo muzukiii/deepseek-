@@ -8,6 +8,21 @@ from typing import Any
 from astrabot.config import Config
 
 
+# 记忆注入字符上限：历史/记忆内容无截断会在记忆膨胀时把成本推高、
+# 甚至挤爆上下文。这里给每类记忆块设一个足够宽裕但封顶的长度，
+# 超限即截断，保证单条消息的 prompt 规模可控。
+_LTM_CAP = 2000
+_FACTS_CAP = 1500
+_OLDMEM_CAP = 1000
+_PERSONAL_CAP = 1500
+
+
+def _cap(text: str, limit: int) -> str:
+    if not text or len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "\n…（记忆内容过长，已截断）"
+
+
 def build_main_prompt(
     config: Config,
     plugin_section: str,
@@ -42,12 +57,12 @@ def build_main_prompt(
     if long_term_memory:
         parts.append("")
         parts.append("【重要记忆】以下是你必须记住的内容：")
-        parts.append(long_term_memory)
+        parts.append(_cap(long_term_memory, _LTM_CAP))
 
     if relevant_facts:
         parts.append("")
         parts.append("【相关记忆】以下是与当前对话相关的记忆：")
-        parts.append(relevant_facts)
+        parts.append(_cap(relevant_facts, _FACTS_CAP))
 
     if long_term_memory or relevant_facts:
         parts.append(
@@ -60,12 +75,12 @@ def build_main_prompt(
     if memory_section and not long_term_memory:
         parts.append("")
         parts.append("你之前记住的东西：")
-        parts.append(memory_section)
+        parts.append(_cap(memory_section, _OLDMEM_CAP))
 
     if personal_memory_section:
         parts.append("")
         parts.append("你对群友的印象：")
-        parts.append(personal_memory_section)
+        parts.append(_cap(personal_memory_section, _PERSONAL_CAP))
 
     parts.append("")
     parts.append("这是最近的聊天记录（从上到下按时间顺序，最后一条是刚刚发生的）：")

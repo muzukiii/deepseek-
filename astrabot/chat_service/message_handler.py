@@ -211,6 +211,20 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
         logger.debug(f"Unknown command ignored: {plain_text[:30]}")
         return
 
+    # 纯文本记忆指令（记住 / 帮我记住 / 请记住 …）：走与斜杠命令相同的
+    # 权限与入库路径，否则该分支永远不可达（此前只有 "/" 前缀才路由到命令）。
+    from astrabot.chat_service.memory_commands import check_implicit_memory_request
+
+    _mem_content = check_implicit_memory_request(plain_text)
+    if _mem_content is not None:
+        handled, reply_text = _run_command(
+            bot, group_id, user_id, "记住：" + _mem_content, config
+        )
+        if handled:
+            if reply_text:
+                await _send_reply(bot, event, group_id, reply_text)
+            return
+
     is_at = event.is_tome()
     is_keyword = any(plain_text.startswith(k) for k in config.keyword) if config.keyword else False
 
@@ -311,19 +325,33 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
 
 
 def _run_command(bot, group_id: int, user_id: str, text: str, config):
-    """执行斜杠命令，返回 (是否已处理, 回复文本)。
+    """执行命令，返回 (是否已处理, 回复文本)。
 
-    只有白名单内的 QQ 才能使用命令；其他人即使发了也不会得到响应，
-    避免群友随意查看用量或增删记忆。
+    命令既支持斜杠（/memory、/用量），也支持纯文本记忆指令（记住：XXX）。
+
+    权限：
+    - 配置了 command_allowed_users 时，只有白名单内的 QQ 能执行任意命令；
+    - 未配置白名单（空白名单）时，只读/新增类命令仍放行，但破坏性命令
+      （删除、清空）一律 fail-safe 拒绝，避免任意群友一键清空记忆。
     """
-    from astrabot.chat_service.memory_commands import handle_memory_command
+    from astrabot.chat_service.memory_commands import (
+        handle_memory_command,
+        is_destructive_command,
+    )
 
     allowed = config.command_allowed_users
-    if allowed and str(user_id) not in allowed:
-        logger.info(
-            f"Command '{text[:20]}' denied for {user_id} (not in whitelist)"
+    if allowed:
+        if str(user_id) not in allowed:
+            logger.info(
+                f"Command '{text[:20]}' denied for {user_id} (not in whitelist)"
+            )
+            return True, ""
+    elif is_destructive_command(text):
+        logger.warning(
+            f"Destructive command '{text[:20]}' blocked for {user_id}: "
+            "command_allowed_users 未配置（fail-safe 拒绝）"
         )
-        return True, ""
+        return True, "删除/清空记忆需要先配置 command_allowed_users 白名单"
 
     try:
         return handle_memory_command(int(group_id), str(user_id), text)
