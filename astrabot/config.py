@@ -135,6 +135,16 @@ class Config:
     BACK_API_KEY: str = ""
     BACK_API_MODEL: str = ""
 
+    # 第三层回退：主→备→三，依次尝试（前一层重试耗尽或遇不可重试错误后切换）。
+    THIRD_API_PROTOCOL: str = ""
+    THIRD_API_BASE_URL: str = ""
+    THIRD_API_KEY: str = ""
+    THIRD_API_MODEL: str = ""
+
+    # 识图独立端点：当主 API 不再适合识图（例如主模型不支持多模态）时，
+    # 用 VISUAL_API_BASE_URL/KEY/MODEL 把识图单独钉到某个可用服务；
+    # 三者留空时识图回退到主 API 配置（保持旧行为）。
+    VISUAL_API_BASE_URL: str = ""
     VISUAL_API_KEY: str = ""
     VISUAL_API_PROVIDER: str = "SILICONFLOW"
     VISUAL_API_MODEL: str = ""
@@ -345,6 +355,11 @@ class Config:
             BACK_API_BASE_URL=raw.get("BACK_API_BASE_URL", ""),
             BACK_API_KEY=raw.get("BACK_API_KEY", ""),
             BACK_API_MODEL=raw.get("BACK_API_MODEL", ""),
+            THIRD_API_PROTOCOL=raw.get("THIRD_API_PROTOCOL", ""),
+            THIRD_API_BASE_URL=raw.get("THIRD_API_BASE_URL", ""),
+            THIRD_API_KEY=raw.get("THIRD_API_KEY", ""),
+            THIRD_API_MODEL=raw.get("THIRD_API_MODEL", ""),
+            VISUAL_API_BASE_URL=raw.get("VISUAL_API_BASE_URL", ""),
             VISUAL_API_KEY=raw.get("VISUAL_API_KEY", ""),
             VISUAL_API_PROVIDER=raw.get("VISUAL_API_PROVIDER", "SILICONFLOW"),
             VISUAL_API_MODEL=raw.get("VISUAL_API_MODEL", ""),

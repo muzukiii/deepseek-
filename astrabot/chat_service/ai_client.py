@@ -220,8 +220,10 @@ async def analyze_images(
     # 解析使用哪个服务：主 API 还是独立视觉 API
     use_main_api = provider in ("", "MAIN", "DEEPSEEK") or not config.VISUAL_API_KEY
     if use_main_api:
-        base_url = config.API_BASE_URL
-        api_key = config.API_KEY
+        # 识图默认复用主 API；若配置了独立的 VISUAL_API_BASE_URL 则优先用它，
+        # 以便主 API 被切成不适合识图的模型时，识图仍能固定走多模态端点。
+        base_url = config.VISUAL_API_BASE_URL or config.API_BASE_URL
+        api_key = config.VISUAL_API_KEY or config.API_KEY
         model = config.VISUAL_API_MODEL or config.API_MODEL
     else:
         base_url = API_BASE_URLS.get(provider, API_BASE_URLS["SILICONFLOW"])
@@ -368,6 +370,8 @@ async def generate_reply(
     providers = [(config.API_PROTOCOL, config.API_BASE_URL, config.API_KEY, config.API_MODEL)]
     if config.BACK_API_KEY and config.BACK_API_MODEL and config.BACK_API_BASE_URL:
         providers.append((config.BACK_API_PROTOCOL, config.BACK_API_BASE_URL, config.BACK_API_KEY, config.BACK_API_MODEL))
+    if config.THIRD_API_KEY and config.THIRD_API_MODEL and config.THIRD_API_BASE_URL:
+        providers.append((config.THIRD_API_PROTOCOL, config.THIRD_API_BASE_URL, config.THIRD_API_KEY, config.THIRD_API_MODEL))
 
     for protocol, base_url, api_key, model in providers:
         for retry in range(RETRY_LIMIT):
