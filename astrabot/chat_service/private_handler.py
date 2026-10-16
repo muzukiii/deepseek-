@@ -36,7 +36,7 @@ async def handle_private_message(bot: Bot, event: PrivateMessageEvent):
         "segments": [{"type": "text", "text": text}],
     })
     history = await get_recent_messages(conversation_id, count=15)
-    catalog = await sticker_prompt_catalog()
+    catalog = await sticker_prompt_catalog(query=text)
     extra_style = config.extra_style
     if catalog:
         extra_style += "\n\n可选表情图片目录（仅在语境明显适合时发送一张；否则 sticker_id 为 null）：\n" + catalog

@@ -605,7 +605,8 @@ async def _reply_flow(
                 )
 
                 catalog = await sticker_prompt_catalog(
-                    limit=config.sticker_catalog_size
+                    limit=config.sticker_catalog_size,
+                    query=current_text,
                 )
                 if catalog:
                     main_prompt += (
