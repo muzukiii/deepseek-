@@ -23,8 +23,7 @@ AstraBot/
 │   ├── chat_service/
 │   │   ├── message_handler.py       # 消息处理核心（解析、上下文组装、AI 调用）
 │   │   ├── ai_client.py             # 统一封装 MiniMax / DeepSeek / SiliconFlow API
-│   │   ├── enhanced_memory.py       # 三层记忆系统
-│   │   ├── fact_extractor.py        # 对话事实自动提取
+│   │   ├── enhanced_memory.py       # 三层记忆系统（含对话事实自动提取）
 │   │   ├── history_manager.py       # 群聊历史记录管理（SQLite + JSONL）
 │   │   ├── memory_manager.py        # 记忆系统入口（LTM / MTM / STM 协调）
 │   │   ├── memory_commands.py       # 自然语言记忆指令解析

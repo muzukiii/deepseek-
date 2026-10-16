@@ -20,7 +20,6 @@ from astrabot.chat_service.history_manager import (
     trim_history,
     set_image_descriptions,
 )
-from astrabot.chat_service.fact_extractor import extract_and_store
 from astrabot.chat_service.image_utils import download_image_base64
 from astrabot.chat_service import mood
 from astrabot.chat_service.memory_manager import (

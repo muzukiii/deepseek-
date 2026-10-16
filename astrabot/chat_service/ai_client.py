@@ -345,6 +345,19 @@ def _extract_reply(parsed: dict) -> str:
 RETRY_LIMIT = 3
 
 
+def _is_retryable_error(exc: Exception) -> bool:
+    """区分可重试与不可重试错误，避免对鉴权/请求错误反复浪费调用。
+
+    带 HTTP 状态码的 API 错误：仅 429（限流）与 5xx（服务端）值得重试；
+    4xx（400/401/403/404/422 等）重试没有意义。无状态码的多为网络/超时类，
+    属于可重试。
+    """
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status == 429 or status >= 500
+    return True
+
+
 async def generate_reply(
     prompt: str,
 ) -> tuple[str, dict]:
@@ -407,7 +420,11 @@ async def generate_reply(
                 logger.warning(f"Raw content that failed to parse:\n{content}")
                 continue
             except Exception as e:
-                logger.warning(f"AI call failed ({protocol}): {e}, retrying...")
-                continue
+                if _is_retryable_error(e):
+                    logger.warning(f"AI call failed ({protocol}): {e}, retrying...")
+                    continue
+                # 不可重试错误（如鉴权/请求非法）：本 provider 直接放弃，换下一个
+                logger.error(f"AI call aborted ({protocol}, non-retryable): {e}")
+                break
 
     return "", {}
