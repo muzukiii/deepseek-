@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 
 import anthropic
 import httpx
@@ -43,7 +42,7 @@ async def chat(
     model: str,
     messages: list[dict],
     response_format: str | None = None,
-    reasoning: bool = False,
+    reasoning_effort: str | None = None,
     max_tokens: int | None = None,
     timeout: int = 30,
 ) -> dict:
@@ -60,8 +59,8 @@ async def chat(
         }
         if response_format == "json_object":
             kwargs["response_format"] = {"type": "json_object"}
-        if reasoning:
-            kwargs["reasoning_effort"] = "high"
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
         if max_tokens:
             kwargs["max_tokens"] = max_tokens
         response = await client.chat.completions.create(**kwargs)
@@ -370,23 +369,20 @@ async def generate_reply(
         messages.append({"role": "system", "content": config.system_prompt})
     messages.append({"role": "user", "content": prompt})
 
-    providers = [(config.API_PROTOCOL, config.API_BASE_URL, config.API_KEY, config.API_MODEL)]
+    providers = [(config.API_PROTOCOL, config.API_BASE_URL, config.API_KEY, config.API_MODEL,
+                  config.reasoning_effort)]
     if config.BACK_API_KEY and config.BACK_API_MODEL and config.BACK_API_BASE_URL:
-        providers.append((config.BACK_API_PROTOCOL, config.BACK_API_BASE_URL, config.BACK_API_KEY, config.BACK_API_MODEL))
+        providers.append((config.BACK_API_PROTOCOL, config.BACK_API_BASE_URL, config.BACK_API_KEY, config.BACK_API_MODEL,
+                          config.back_reasoning_effort))
     if config.THIRD_API_KEY and config.THIRD_API_MODEL and config.THIRD_API_BASE_URL:
-        providers.append((config.THIRD_API_PROTOCOL, config.THIRD_API_BASE_URL, config.THIRD_API_KEY, config.THIRD_API_MODEL))
+        providers.append((config.THIRD_API_PROTOCOL, config.THIRD_API_BASE_URL, config.THIRD_API_KEY, config.THIRD_API_MODEL,
+                          config.third_reasoning_effort))
 
-    for protocol, base_url, api_key, model in providers:
+    for protocol, base_url, api_key, model, effort in providers:
         for retry in range(RETRY_LIMIT):
             try:
                 logger.debug(f"AI call attempt: protocol={protocol}, base_url={base_url}, model={model} (retry {retry + 1}/{RETRY_LIMIT})")
-                # reasoning 会先输出大段思维链，延迟通常增加 3~6 倍。
-                # 默认关闭以保证聊天响应速度，可用 AI_REASONING=true 开启。
-                use_reasoning = (
-                    protocol.upper() == "OPENAI"
-                    and os.environ.get("AI_REASONING", "false").strip().lower()
-                    in ("1", "true", "yes", "on")
-                )
+                # 按档透传思维链档位：智谱靠 low 把 reasoning 压到 0，DeepSeek 留空不传
                 result = await chat(
                     protocol=protocol,
                     base_url=base_url,
@@ -394,7 +390,7 @@ async def generate_reply(
                     model=model,
                     messages=messages,
                     response_format="json_object",
-                    reasoning=use_reasoning,
+                    reasoning_effort=effort or None,
                     max_tokens=config.chat_max_tokens,
                     timeout=30,
                 )

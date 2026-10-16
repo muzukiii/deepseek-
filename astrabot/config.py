@@ -104,9 +104,19 @@ class Config:
     # 达到上限后的冷却秒数，期满自动恢复（0 = 只靠别人插话恢复）
     reply_streak_cooldown: int = 300
 
-    # 单次回复的 max_tokens 硬顶：压低输出长度以缩短生成延迟（延迟≈与输出 token 成正比）。
-    # 需为 JSON 结构留余量，过小会截断 JSON 导致解析失败。
-    chat_max_tokens: int = 512
+    # 单次回复的 max_tokens 硬顶。它是上限不是目标，留足余量以免 JSON 被截断。
+    chat_max_tokens: int = 2048
+
+    # 思维链档位，按 provider 分档配置；空字符串 = 不传该参数（保持服务端默认）。
+    # 2026-10-16 直接打接口实测：
+    #   智谱 glm-5.3-flash/flashx 服务端默认就思考（一条 trivial 请求烧 119 个
+    #   reasoning token），显式关闭思考会被拒（HTTP 400 code 1210「该模型始终思考」），
+    #   只能降档：low 实测 reasoning=0、2.3s。
+    #   deepseek-chat 默认**不**思考；一旦传 reasoning_effort 反而开启思考（实测 148
+    #   reasoning token），所以第三档默认留空不传。
+    reasoning_effort: str = "low"
+    back_reasoning_effort: str = "low"
+    third_reasoning_effort: str = ""
 
     # 生气冷落：模型判定被某人惹到时，短暂无视对方（默认 10 分钟）
     mood_enabled: bool = True
@@ -259,6 +269,15 @@ class Config:
             val = str(raw.get(key, default)).strip().lower()
             return val in ("1", "true", "yes", "on")
 
+        def _effort_env(key: str, default: str) -> str:
+            """思维链档位：只接受 low/high/max 或空（=不传该参数）。"""
+            val = str(raw.get(key, default)).strip().lower()
+            return val if val in ("", "low", "high", "max") else default
+
+        reasoning_effort = _effort_env("reasoning_effort", "low")
+        back_reasoning_effort = _effort_env("back_reasoning_effort", "low")
+        third_reasoning_effort = _effort_env("third_reasoning_effort", "")
+
         poke_reply = _bool_env("poke_reply", True)
         poke_back = _bool_env("poke_back", True)
 
@@ -288,7 +307,7 @@ class Config:
 
         max_reply_streak = _int_env("max_reply_streak", 3, 0, 50)
         reply_streak_cooldown = _int_env("reply_streak_cooldown", 300, 0, 86400)
-        chat_max_tokens = _int_env("chat_max_tokens", 512, 64, 8000)
+        chat_max_tokens = _int_env("chat_max_tokens", 2048, 64, 8000)
         mood_enabled = _bool_env("mood_enabled", True)
         mood_angry_seconds = _int_env("mood_angry_seconds", 600, 30, 86400)
         mood_ignore_at = _bool_env("mood_ignore_at", True)
@@ -332,6 +351,9 @@ class Config:
             max_reply_streak=max_reply_streak,
             reply_streak_cooldown=reply_streak_cooldown,
             chat_max_tokens=chat_max_tokens,
+            reasoning_effort=reasoning_effort,
+            back_reasoning_effort=back_reasoning_effort,
+            third_reasoning_effort=third_reasoning_effort,
             mood_enabled=mood_enabled,
             mood_angry_seconds=mood_angry_seconds,
             mood_ignore_at=mood_ignore_at,
