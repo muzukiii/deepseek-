@@ -448,7 +448,9 @@ async def _reply_flow(
     re_exec_append = plugin_hook_result.re_exec_append
     pre_prompt_parts = plugin_hook_result.pre_prompt_parts
 
-    plugin_section = PluginLoader.get_plugin_section(event=event)
+    plugin_section = PluginLoader.get_plugin_section(
+        event=event, enabled=config.plugin_exec_enabled
+    )
 
     if plugin_result and plugin_result.get("skip_main") and not re_exec_append:
         # 插件要求跳过主 AI 调用，直接使用插件返回的回复
@@ -675,34 +677,56 @@ async def _reply_flow(
                 pass
             mood.set_angry(group_id, user_id, seconds=secs, reason=reason)
 
-    for _round in range(10):
-        # 检查 AI 回复中是否包含插件调用字段，若有则执行插件并重新生成回复
-        plugin_val = None
-        exec_fn = None
-        exec_plugin = None
-        for p in PluginLoader.plugins:
-            v = reply_json.get(p.name)
-            if v is not None and isinstance(v, str) and v.strip():
-                plugin_val = v
-                exec_fn = getattr(p.module, "execute", None)
-                exec_plugin = p
+    # 插件工具执行（模型驱动的 execute() 调用）默认关闭：仅当 plugin_exec_enabled
+    # 为真时才会进入。开启后仍对每轮设上限，并对每次 execute 施加超时与异常兜底，
+    # 避免任意外部插件代码把整条回复链路拖死或放大付费调用。
+    if config.plugin_exec_enabled:
+        for _round in range(config.plugin_exec_max_rounds):
+            # 检查 AI 回复中是否包含插件调用字段，若有则执行插件并重新生成回复
+            plugin_val = None
+            exec_fn = None
+            exec_plugin = None
+            for p in PluginLoader.plugins:
+                v = reply_json.get(p.name)
+                if v is not None and isinstance(v, str) and v.strip():
+                    plugin_val = v
+                    exec_fn = getattr(p.module, "execute", None)
+                    exec_plugin = p
+                    break
+            if not exec_fn or not plugin_val:
                 break
-        if not exec_fn or not plugin_val:
-            break
-        if reply_text:
-            await _send_reply(bot, event, group_id, reply_text, reply_json=reply_json, record_reply=True)
-        output = await exec_fn(plugin_val, group_id=group_id, plugin_config=getattr(exec_plugin, "settings", None))
-        logger.info(f"Plugin executed: {plugin_val}")
-        logger.debug(f"Plugin output:\n{output[:1000]}")
-        plugin_inject = f"你执行了命令 `{plugin_val}`，输出如下：\n{output[:2000]}"
-        main_prompt += "\n\n" + plugin_inject
-        await append_message(group_id, {
-            "time": int(time.time()), "message_id": 0,
-            "user_id": str(bot.self_id), "user_name": "",
-            "message": plugin_inject[:500], "images": None,
-            "segments": [{"type": "text", "text": plugin_inject[:500]}],
-        })
-        reply_text, reply_json = await generate_reply(main_prompt)
+            if reply_text:
+                await _send_reply(bot, event, group_id, reply_text, reply_json=reply_json, record_reply=True)
+            try:
+                output = await asyncio.wait_for(
+                    exec_fn(
+                        plugin_val,
+                        group_id=group_id,
+                        plugin_config=getattr(exec_plugin, "settings", None),
+                    ),
+                    timeout=config.plugin_exec_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Plugin {exec_plugin.name} execute timed out after {config.plugin_exec_timeout}s"
+                )
+                break
+            except Exception as e:
+                logger.error(f"Plugin {exec_plugin.name} execute failed: {e}")
+                break
+            if not isinstance(output, str):
+                output = str(output or "")
+            logger.info(f"Plugin executed: {plugin_val}")
+            logger.debug(f"Plugin output:\n{output[:1000]}")
+            plugin_inject = f"你执行了命令 `{plugin_val}`，输出如下：\n{output[:2000]}"
+            main_prompt += "\n\n" + plugin_inject
+            await append_message(group_id, {
+                "time": int(time.time()), "message_id": 0,
+                "user_id": str(bot.self_id), "user_name": "",
+                "message": plugin_inject[:500], "images": None,
+                "segments": [{"type": "text", "text": plugin_inject[:500]}],
+            })
+            reply_text, reply_json = await generate_reply(main_prompt)
 
     if not reply_text:
         logger.info(f"No reply generated for group {group_id}")

@@ -110,6 +110,13 @@ class Config:
     # 冷落期间是否连 @ 都不理。True 更"真性情"，False 则只在非 @ 时冷落。
     mood_ignore_at: bool = True
 
+    # 插件工具执行：插件可注册 execute()，由模型在回复 JSON 中填写插件名字段来触发。
+    # 由于插件是任意外部代码、可执行命令，默认关闭（opt-in），需显式设为 true 才启用，
+    # 且对每次执行施加超时与总轮数上限，避免失控循环或长时间阻塞。
+    plugin_exec_enabled: bool = False
+    plugin_exec_max_rounds: int = 3
+    plugin_exec_timeout: int = 30
+
     # 四种回复概率，分别对应：普通消息 / @触发 / 回复中继续搭话 / 回复中被@插入
     reply_rate: float = 0.1
     reply_rate_at: float = 1.0
@@ -266,6 +273,10 @@ class Config:
         mood_angry_seconds = _int_env("mood_angry_seconds", 600, 30, 86400)
         mood_ignore_at = _bool_env("mood_ignore_at", True)
 
+        plugin_exec_enabled = _bool_env("plugin_exec_enabled", False)
+        plugin_exec_max_rounds = _int_env("plugin_exec_max_rounds", 3, 1, 10)
+        plugin_exec_timeout = _int_env("plugin_exec_timeout", 30, 1, 300)
+
         # 忽略名单：支持 ignore_users=[123,456] 或 123,456
         ignore_raw = raw.get("ignore_users", "")
         ignore_users: set[str] = set()
@@ -300,6 +311,9 @@ class Config:
             mood_enabled=mood_enabled,
             mood_angry_seconds=mood_angry_seconds,
             mood_ignore_at=mood_ignore_at,
+            plugin_exec_enabled=plugin_exec_enabled,
+            plugin_exec_max_rounds=plugin_exec_max_rounds,
+            plugin_exec_timeout=plugin_exec_timeout,
             sticker_enabled=sticker_enabled,
             sticker_autosave=sticker_autosave,
             sticker_max_count=sticker_max_count,

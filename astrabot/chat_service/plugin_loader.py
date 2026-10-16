@@ -104,13 +104,18 @@ class PluginLoader:
         cls._loaded = True
 
     @classmethod
-    def get_plugin_section(cls, event: Any | None = None) -> str:
-        """生成注入到 prompt 中的工具说明文本，告知 AI 可用的插件字段"""
-        if not cls.plugins:
+    def get_plugin_section(cls, event: Any | None = None, enabled: bool = True) -> str:
+        """生成注入到 prompt 中的工具说明文本，告知 AI 可用的插件字段。
+
+        enabled=False 时返回空串：模型看不到任何工具字段，也就不会在回复里
+        填写插件调用指令（配合调用侧对 execute 循环的开关，构成 opt-in 默认关闭）。
+        """
+        if not cls.plugins or not enabled:
             return ""
 
         required = []
         optional = []
+        sample_name = ""
         for p in cls.plugins:
             if event is not None and not cls._is_plugin_enabled_for_event(p, event):
                 continue
@@ -121,10 +126,15 @@ class PluginLoader:
             if not desc:
                 continue
             entry = f"{p.name}({fmt})：{desc}"
+            if not sample_name:
+                sample_name = p.name
             if p.settings.get("must", False):
                 required.append(entry)
             else:
                 optional.append(entry)
+
+        if not required and not optional:
+            return ""
 
         lines = ["【可用工具】（需要时直接在回复 JSON 中添加对应字段即可调用）："]
         if required:
@@ -135,7 +145,10 @@ class PluginLoader:
             lines.append("  可选工具（需要时使用）：")
             for o in optional:
                 lines.append(f"    {o}")
-        lines.append("  示例：{\"reply\": \"...\", \"docker_exec\": \"ls -la\"}")
+        if sample_name:
+            lines.append(
+                f'  示例：{{"reply": "...", "{sample_name}": "<传给该工具的参数>"}}'
+            )
         return "\n".join(lines)
 
     @staticmethod
