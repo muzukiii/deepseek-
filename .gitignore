@@ -62,3 +62,6 @@ run_migrate.py
 MEMORY_*.md
 INTEGRATION_COMPLETE.md
 QUICK_START.md
+
+# 但保留 tests/ 目录下纳入版本库的单元测试（区别于上面的临时 test_*.py 脚本）
+!tests/test_*.py
