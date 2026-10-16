@@ -49,63 +49,60 @@ async def chat(
     protocol_upper = protocol.upper()
 
     if protocol_upper == "OPENAI":
-        http_client = _get_httpx_client()
-        client = _create_openai_client(base_url=base_url, api_key=api_key, http_client=http_client)
-        try:
-            kwargs = {
-                "model": model,
-                "messages": messages,
-                "timeout": timeout,
-            }
-            if response_format == "json_object":
-                kwargs["response_format"] = {"type": "json_object"}
-            if reasoning:
-                kwargs["reasoning_effort"] = "high"
-            response = await client.chat.completions.create(**kwargs)
-            msg = response.choices[0].message
-            content = msg.content or ""
-            reasoning_content = getattr(msg, "reasoning_content", None)
-            usage = getattr(response, "usage", None)
+        client = _create_openai_client(
+            base_url=base_url, api_key=api_key, http_client=_get_httpx_client()
+        )
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "timeout": timeout,
+        }
+        if response_format == "json_object":
+            kwargs["response_format"] = {"type": "json_object"}
+        if reasoning:
+            kwargs["reasoning_effort"] = "high"
+        response = await client.chat.completions.create(**kwargs)
+        msg = response.choices[0].message
+        content = msg.content or ""
+        reasoning_content = getattr(msg, "reasoning_content", None)
+        usage = getattr(response, "usage", None)
+        usage_tracker.record(
+            kind="chat",
+            model=model,
+            usage=usage.model_dump() if usage is not None else None,
+        )
+        return {"content": content, "reasoning": reasoning_content}
+
+    if protocol_upper == "ANTHROPIC":
+        client = _create_anthropic_client(
+            base_url=base_url, api_key=api_key, http_client=_get_httpx_client()
+        )
+        anthropic_messages = [m for m in messages if m["role"] != "system"]
+        system_content = next((m["content"] for m in messages if m["role"] == "system"), None)
+        kwargs = {
+            "model": model,
+            "max_tokens": 4096,
+            "messages": anthropic_messages,
+            "timeout": timeout,
+        }
+        if system_content:
+            kwargs["system"] = system_content
+        message = await client.messages.create(**kwargs)
+        content = ""
+        for block in message.content:
+            if block.type == "text":
+                content += block.text
+        anth_usage = getattr(message, "usage", None)
+        if anth_usage is not None:
             usage_tracker.record(
                 kind="chat",
                 model=model,
-                usage=usage.model_dump() if usage is not None else None,
+                usage={
+                    "prompt_tokens": getattr(anth_usage, "input_tokens", 0),
+                    "completion_tokens": getattr(anth_usage, "output_tokens", 0),
+                },
             )
-            return {"content": content, "reasoning": reasoning_content}
-        finally:
-            await http_client.aclose()
-
-    if protocol_upper == "ANTHROPIC":
-        http_client = _get_httpx_client()
-        client = _create_anthropic_client(base_url=base_url, api_key=api_key, http_client=http_client)
-        try:
-            anthropic_messages = [m for m in messages if m["role"] != "system"]
-            system_content = next((m["content"] for m in messages if m["role"] == "system"), None)
-            kwargs = {
-                "model": model,
-                "max_tokens": 4096,
-                "messages": anthropic_messages,
-            }
-            if system_content:
-                kwargs["system"] = system_content
-            message = await client.messages.create(**kwargs)
-            content = ""
-            for block in message.content:
-                if block.type == "text":
-                    content += block.text
-            anth_usage = getattr(message, "usage", None)
-            if anth_usage is not None:
-                usage_tracker.record(
-                    kind="chat",
-                    model=model,
-                    usage={
-                        "prompt_tokens": getattr(anth_usage, "input_tokens", 0),
-                        "completion_tokens": getattr(anth_usage, "output_tokens", 0),
-                    },
-                )
-            return {"content": content}
-        finally:
-            await http_client.aclose()
+        return {"content": content}
 
     raise ValueError(f"Unknown protocol: {protocol}")
 
@@ -288,8 +285,6 @@ async def analyze_images(
     except Exception as e:
         logger.error(f"Image analysis failed: {e}")
         return {}
-    finally:
-        await http_client.aclose()
 
 
 def _clean_json(raw: str) -> str:

@@ -249,7 +249,5 @@ async def run_search(initial_query: str, context: str) -> dict:
         # Python 3.11+ ExceptionGroup：MCP stdio 关闭时可能抛出多异常
         import traceback
         logger.error(f"Search agent full traceback:\n{''.join(traceback.format_exception(type(eg), eg, eg.__traceback__))}")
-    finally:
-        await http_client.aclose()
 
     return summary_result

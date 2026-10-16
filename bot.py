@@ -102,6 +102,15 @@ _driver.register_adapter(Adapter)
 
 nonebot.load_plugins("astrabot")
 
+
+@_driver.on_shutdown
+async def _close_shared_http_client() -> None:
+    """进程退出时关闭共享 httpx 连接池，优雅释放 keep-alive 连接。"""
+    from astrabot.chat_service.http_client import aclose_http_client
+
+    await aclose_http_client()
+
+
 _patch_uvicorn_server()
 
 
