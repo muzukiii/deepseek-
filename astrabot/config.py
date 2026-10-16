@@ -171,25 +171,32 @@ class Config:
                 raise ValueError(f"Missing required config: {key}")
 
         enabled_groups_raw = raw.get("enabled_groups", "[]")
-        if isinstance(enabled_groups_raw, str):
-            enabled_groups = [int(x) for x in ast.literal_eval(enabled_groups_raw)]
-        else:
-            enabled_groups = [int(x) for x in enabled_groups_raw]
+        try:
+            if isinstance(enabled_groups_raw, str):
+                enabled_groups = [int(x) for x in ast.literal_eval(enabled_groups_raw)]
+            else:
+                enabled_groups = [int(x) for x in enabled_groups_raw]
+        except (ValueError, TypeError, SyntaxError):
+            # 畸形 .env 值不应让机器人启动即崩，回退为不限制群
+            enabled_groups = []
 
         float_keys = ["reply_rate", "reply_rate_at", "reply_rate_in_reply", "reply_rate_at_in_reply"]
         floats = {}
         for key in float_keys:
             val = raw.get(key, "0.1")
             try:
-                floats[key] = float(val)
+                floats[key] = max(0.0, min(1.0, float(val)))
             except (ValueError, TypeError):
                 floats[key] = 0.1
 
         keyword_raw = raw.get("keyword", "[]")
-        if isinstance(keyword_raw, str):
-            keyword = ast.literal_eval(keyword_raw)
-        else:
-            keyword = list(keyword_raw)
+        try:
+            if isinstance(keyword_raw, str):
+                keyword = ast.literal_eval(keyword_raw)
+            else:
+                keyword = list(keyword_raw)
+        except (ValueError, TypeError, SyntaxError):
+            keyword = []
 
         quote_reply = str(raw.get("quote_reply", "false")).strip().lower() in (
             "1",

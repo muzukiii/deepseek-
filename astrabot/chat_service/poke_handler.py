@@ -27,9 +27,10 @@ from astrabot.chat_service.prompt_builder import format_history
 from astrabot.config import get_config
 from astrabot.logmanager.logger import logger
 
-# 同一群短时间内被反复戳时的冷却，避免刷屏
+# 同一(群,用户)短时间内被反复戳时的冷却，避免刷屏；按人区分，避免一人连戳
+# 抑制同群其他人的戳一戳
 _POKE_COOLDOWN = 3.0
-_last_poke: dict[int, float] = {}
+_last_poke: dict[tuple[int, str], float] = {}
 
 
 def _build_poke_prompt(user_name: str, user_id: str, history_text: str) -> str:
@@ -73,14 +74,20 @@ async def handle_poke(bot: Bot, data: dict) -> None:
     if group_id and config.enabled_groups and int(group_id) not in config.enabled_groups:
         return
 
-    # 冷却：同一群短时间内只响应一次，避免连点刷屏
+    # 冷却：同一(群,用户)短时间内只响应一次；换个人戳不受影响
     if group_id:
         now = time.time()
-        last = _last_poke.get(int(group_id), 0.0)
+        key = (int(group_id), str(user_id))
+        last = _last_poke.get(key, 0.0)
         if now - last < _POKE_COOLDOWN:
             logger.debug(f"Poke from {user_id} skipped (cooldown)")
             return
-        _last_poke[int(group_id)] = now
+        # 顺带清理过期键，避免条目随群/用户数无界增长
+        if len(_last_poke) > 64:
+            for k, v in list(_last_poke.items()):
+                if now - v >= _POKE_COOLDOWN:
+                    _last_poke.pop(k, None)
+        _last_poke[key] = now
 
     logger.info(f"Poked by {user_id} in group {group_id}")
 
