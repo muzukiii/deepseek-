@@ -22,20 +22,69 @@ USAGE_DB = DATA_DIR / "usage.jsonl"
 # 并让 summary() 的读取成本保持在有界窗口内。
 MAX_USAGE_FILE_BYTES = 1_000_000
 
-# DeepSeek 峰时价格（美元 / 1M tokens），用于估算花费
-_PRICE = {
-    "input_cache_hit": 0.006,
-    "input_cache_miss": 0.3,
-    "output": 1.2,
+# 每个模型的单价（美元 / 1M tokens）。按模型名精确匹配取价；
+# 也可用环境变量 MODEL_PRICING_JSON 覆盖或扩展（见 _load_pricing）。
+# 未配置价格的模型不会被错误地套用别的模型的价，而是标记为「未配置」。
+# 智谱价取自 Z.ai 国际站公开牌价（USD/1M，含缓存输入），无峰谷折扣。
+_DEFAULT_PRICING: dict[str, dict] = {
+    "deepseek-chat": {"input": 0.3, "output": 1.2, "cache_hit": 0.006, "peak": True},
+    "glm-5.3-flash": {"input": 0.15, "output": 0.50, "cache_hit": 0.03},
+    "glm-5.3-flashx": {"input": 0.37, "output": 1.25, "cache_hit": 0.075},
 }
-# 峰谷时段（UTC）：01:00-04:00 与 06:00-10:00 为峰时，其余折半
+# 模型名前缀 → 默认价，用于未精确命中时的兜底（目前仅 DeepSeek）。
+_PREFIX_PRICING: dict[str, str] = {"deepseek": "deepseek-chat"}
+# 峰谷时段（UTC）：01:00-04:00 与 06:00-10:00 为峰时，其余折半（仅对 peak=True 生效）
 _PEAK_HOURS = set(range(1, 4)) | set(range(6, 10))
+
+_pricing_cache: dict[str, dict] | None = None
 
 _lock = threading.Lock()
 
 
-def _estimate_cost(usage: dict) -> float:
-    """按 DeepSeek 计费规则估算本次花费（美元）。"""
+def _load_pricing() -> dict[str, dict]:
+    """合并内置默认价与 MODEL_PRICING_JSON（进程启动后 env 固定，结果缓存一次）。
+
+    MODEL_PRICING_JSON 形如：
+      {"glm-5.3-flash": {"input": 0.0, "output": 0.0, "cache_hit": 0.0}, ...}
+    单位美元/1M tokens；`peak`(bool) 可选，默认 False（智谱等按量计价的模型不分峰谷）。
+    解析失败时安全回退到内置默认，绝不影响主流程。
+    """
+    global _pricing_cache
+    if _pricing_cache is not None:
+        return _pricing_cache
+    table = {k: dict(v) for k, v in _DEFAULT_PRICING.items()}
+    raw = os.environ.get("MODEL_PRICING_JSON", "").strip()
+    if raw:
+        try:
+            override = json.loads(raw)
+            if isinstance(override, dict):
+                for model, price in override.items():
+                    if isinstance(price, dict):
+                        table[str(model)] = {**table.get(str(model), {}), **price}
+        except (json.JSONDecodeError, TypeError, ValueError) as e:
+            logger.warning(f"MODEL_PRICING_JSON 解析失败，仅用内置默认价: {e}")
+    _pricing_cache = table
+    return table
+
+
+def _price_for(model: str) -> dict | None:
+    """按模型名取价：精确命中优先，否则按前缀兜底，都未命中返回 None（未配置）。"""
+    table = _load_pricing()
+    price = table.get(model)
+    if price is None:
+        for prefix, fallback in _PREFIX_PRICING.items():
+            if model.lower().startswith(prefix):
+                return table.get(fallback)
+        return None
+    return price
+
+
+def _estimate_cost(usage: dict, model: str) -> float:
+    """按该模型的单价估算本次花费（美元）。未配置单价时返回 0.0。"""
+    price = _price_for(model)
+    if price is None:
+        return 0.0
+
     hit = usage.get("cache_hit_tokens") or 0
     miss = usage.get("cache_miss_tokens")
     prompt = usage.get("prompt_tokens") or 0
@@ -44,13 +93,15 @@ def _estimate_cost(usage: dict) -> float:
         miss = max(0, prompt - hit)
     completion = usage.get("completion_tokens") or 0
 
-    hour = datetime.now().hour
-    factor = 1.0 if hour in _PEAK_HOURS else 0.5
+    factor = 1.0
+    if price.get("peak"):
+        # 仅 DeepSeek 这类峰谷计价模型：峰时原价、平时折半
+        factor = 1.0 if datetime.now().hour in _PEAK_HOURS else 0.5
 
     return factor * (
-        hit / 1_000_000 * _PRICE["input_cache_hit"]
-        + miss / 1_000_000 * _PRICE["input_cache_miss"]
-        + completion / 1_000_000 * _PRICE["output"]
+        hit / 1_000_000 * price.get("cache_hit", 0.0)
+        + miss / 1_000_000 * price.get("input", 0.0)
+        + completion / 1_000_000 * price.get("output", 0.0)
     )
 
 
@@ -98,7 +149,9 @@ def record(
         "cache_hit_tokens": hit,
         "cache_miss_tokens": max(0, prompt - hit),
     }
-    entry["cost_usd"] = round(_estimate_cost(entry), 8)
+    priced = _price_for(model) is not None
+    entry["priced"] = priced
+    entry["cost_usd"] = round(_estimate_cost(entry, model), 8) if priced else 0.0
 
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -110,11 +163,18 @@ def record(
         logger.debug(f"Failed to record usage: {e}")
         return
 
-    logger.info(
-        f"API 用量[{kind}] {model}: "
-        f"in={prompt}(cache {hit}) out={completion} "
-        f"≈${entry['cost_usd']:.6f}"
-    )
+    if priced:
+        logger.info(
+            f"API 用量[{kind}] {model}: "
+            f"in={prompt}(cache {hit}) out={completion} "
+            f"≈${entry['cost_usd']:.6f}"
+        )
+    else:
+        logger.info(
+            f"API 用量[{kind}] {model}: "
+            f"in={prompt}(cache {hit}) out={completion} "
+            f"(价格未配置→花费计 0；在 .env 的 MODEL_PRICING_JSON 补该模型单价)"
+        )
 
 
 def _load(days: int | None = None) -> list[dict]:
@@ -166,7 +226,9 @@ def summary(days: int | None = None) -> str:
     by_model: dict[str, dict] = {}
     for r in rows:
         m = r.get("model", "?")
-        agg = by_model.setdefault(m, {"calls": 0, "in": 0, "out": 0, "cost": 0.0})
+        agg = by_model.setdefault(
+            m, {"calls": 0, "in": 0, "out": 0, "cost": 0.0, "priced": r.get("priced", True)}
+        )
         agg["calls"] += 1
         agg["in"] += r.get("prompt_tokens", 0)
         agg["out"] += r.get("completion_tokens", 0)
@@ -180,5 +242,15 @@ def summary(days: int | None = None) -> str:
                 f"    {m}: {a['calls']} 次  "
                 f"in={a['in']:,} out={a['out']:,}  ${a['cost']:.4f}"
             )
+
+    # 未配置单价的模型：其花费恒为 0，汇总总额会偏低，需显式提示。
+    unpriced = sorted(m for m, a in by_model.items() if not a.get("priced", True))
+    if unpriced:
+        lines.append("")
+        lines.append(
+            f"  ⚠ 以下模型未配置单价，花费按 0 计（总花费被低估）："
+            f"{', '.join(unpriced)}"
+        )
+        lines.append("    在 .env 的 MODEL_PRICING_JSON 补上其单价后重新统计。")
 
     return "\n".join(lines)
