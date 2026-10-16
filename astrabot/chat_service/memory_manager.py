@@ -139,29 +139,30 @@ def delete_memory(group_id: int, index: int):
         _save_json(MEMORIES_PATH, data)
 
 
-def process_memorize(group_id: int, memorize: list):
-    """处理 AI 返回的记忆操作：字符串为新增，整数为按序号删除"""
-    from astrabot.chat_service.enhanced_memory import add_long_term_memory, delete_long_term_memory, get_long_term_memories
+def process_memorize(group_id: int, memorize: list, shown_ltm_ids: list[int] | None = None):
+    """处理 AI 返回的记忆操作，长期记忆以 SQLite 为唯一真源。
+
+    - string：新增长期记忆（只写 SQLite，不再双写旧 JSON）。
+    - int：删除模型「本轮看到的第 N 条」记忆。N 是 build_memory_context 注入
+      进 prompt 的有序列表的 1-based 序号，因此必须用本轮传入的 shown_ltm_ids
+      映射回真实 id——否则会与旧 JSON 的插入序错位而删错条目。未提供或越界时
+      只记录、不猜删。
+    """
+    from astrabot.chat_service.enhanced_memory import add_long_term_memory, delete_long_term_memory
+
+    ids = list(shown_ltm_ids or [])
     for item in memorize:
         if isinstance(item, str):
-            # 新增记忆，同时写入旧 JSON 存储和新 SQLite 长期记忆
-            add_memory(group_id, item)
-
             add_long_term_memory(group_id, item)
         elif isinstance(item, int):
-            # 按 1-based 序号删除记忆，同时清理两个存储中的对应条目
-
-            old_memories = get_memories(group_id)
             zero_idx = item - 1
-            old_content = old_memories[zero_idx] if 0 <= zero_idx < len(old_memories) else None
-            delete_memory(group_id, item)
-
-            if old_content:
-                ltm_list = get_long_term_memories(group_id)
-                for ltm in ltm_list:
-                    if ltm["content"] == old_content:
-                        delete_long_term_memory(group_id, ltm["id"])
-                        break
+            if 0 <= zero_idx < len(ids):
+                delete_long_term_memory(group_id, ids[zero_idx])
+            else:
+                logger.warning(
+                    f"memorize delete index {item} out of range "
+                    f"(shown {len(ids)} memories) in group {group_id}; skipped"
+                )
 
 
 

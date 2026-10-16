@@ -582,16 +582,16 @@ def build_memory_context(
     max_long_term: int = 12,
     priority_user_ids: set[str] | None = None,
     priority_ratio: float = 0.7,
-) -> dict[str, str]:
-    """构建记忆上下文，返回长期记忆与相关事实两部分文本。
+) -> dict[str, object]:
+    """构建记忆上下文，返回长期记忆文本、相关事实文本，以及本轮展示给
+    模型的长期记忆 id 列表。
 
     priority_user_ids 用于把事实记忆的注意力集中在当前对话对象身上
     （通常是发言人 / 被 @ 的人 / 被回复的人），避免被其他群成员的信息带偏。
 
-    注：曾在此按 relevant_user_ids 逐条查询 SQLite user_impressions 并塞进
-    返回值，但调用方从不读取该 "impressions" 键——"对群友的印象"实际来自
-    JSON 侧的 personal_memory_section。那段查询是每条消息都会跑的无用开销，
-    已移除。
+    long_term_ids 与 "long_term" 文本里的编号严格同序：第 k 条展示记忆对应
+    long_term_ids[k-1]。模型删除记忆时输出的是它看到的序号，调用方据此把序
+    号映射回真实 SQLite id，杜绝"按 JSON 插入序删错条目"的旧问题。
     """
 
     ltm = get_long_term_memories(group_id, limit=max_long_term, query=current_message)
@@ -618,6 +618,7 @@ def build_memory_context(
     return {
         "long_term": ltm_text,
         "facts": facts_text,
+        "long_term_ids": [m["id"] for m in ltm],
     }
 
 

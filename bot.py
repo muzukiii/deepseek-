@@ -111,6 +111,22 @@ async def _close_shared_http_client() -> None:
     await aclose_http_client()
 
 
+@_driver.on_startup
+async def _reconcile_legacy_memory() -> None:
+    """启动时把旧 memories.json 的长期记忆幂等并入 SQLite（唯一真源）。
+
+    这是停用 JSON 双写之前的数据对账：add_long_term_memory 靠 UNIQUE+归一化
+    去重，重复跑不会产生副本，所以每次启动都可安全执行。失败不影响启动——
+    运行期仍照常工作，只是旧 JSON 里的历史条目可能没被搬进 SQLite。
+    """
+    try:
+        from astrabot.chat_service.enhanced_memory import migrate_from_old_memory_system
+
+        migrate_from_old_memory_system()
+    except Exception as e:
+        logger.warning(f"旧记忆迁移跳过（不影响启动）: {e}")
+
+
 _patch_uvicorn_server()
 
 

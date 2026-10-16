@@ -24,7 +24,6 @@ from astrabot.chat_service.image_utils import download_image_base64
 from astrabot.chat_service import mood
 from astrabot.chat_service.memory_manager import (
     is_user_ignored,
-    get_memories,
     get_personal_memorize,
     process_memorize,
     process_personal_memorize,
@@ -580,9 +579,10 @@ async def _reply_flow(
     formatted_history = format_history(history, history_image_descs)
 
 
-    memories = get_memories(group_id)
-    logger.debug(f"Loaded {len(memories)} memories for group {group_id}: {memories}")
-    memory_section = "\n".join(f"{i}. {m}" for i, m in enumerate(memories, 1)) if memories else ""
+    # 长期记忆已收敛为 SQLite 单一真源（memory_ctx["long_term"] 始终注入），
+    # 旧 JSON 的 memory_section 回退退役：启动时 migrate 已把 JSON 记忆并入
+    # SQLite，这里恒为空，避免"两套编号"导致模型删除时错位。
+    memory_section = ""
 
 
     personal_memories = get_personal_memorize(group_id)
@@ -695,7 +695,7 @@ async def _reply_flow(
 
     memorize = reply_json.get("memorize")
     if memorize:
-        process_memorize(group_id, memorize)
+        process_memorize(group_id, memorize, memory_ctx["long_term_ids"])
 
     personal_memorize = reply_json.get("personal_memorize")
     if personal_memorize:
