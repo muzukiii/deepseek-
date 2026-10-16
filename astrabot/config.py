@@ -117,6 +117,11 @@ class Config:
     plugin_exec_max_rounds: int = 3
     plugin_exec_timeout: int = 30
 
+    # 联网搜索代理护栏：整段多轮搜索的墙钟总预算（秒）与「连续只回文本不调工具」的早停轮数。
+    # 单次调用已有 20s 超时，这里约束的是最坏 10 轮叠加成的分钟级耗时与失控循环。
+    search_wallclock_timeout: int = 120
+    search_no_tool_turns_limit: int = 2
+
     # 四种回复概率，分别对应：普通消息 / @触发 / 回复中继续搭话 / 回复中被@插入
     reply_rate: float = 0.1
     reply_rate_at: float = 1.0
@@ -287,6 +292,9 @@ class Config:
         plugin_exec_max_rounds = _int_env("plugin_exec_max_rounds", 3, 1, 10)
         plugin_exec_timeout = _int_env("plugin_exec_timeout", 30, 1, 300)
 
+        search_wallclock_timeout = _int_env("search_wallclock_timeout", 120, 5, 600)
+        search_no_tool_turns_limit = _int_env("search_no_tool_turns_limit", 2, 1, 10)
+
         # 忽略名单：支持 ignore_users=[123,456] 或 123,456
         ignore_raw = raw.get("ignore_users", "")
         ignore_users: set[str] = set()
@@ -324,6 +332,8 @@ class Config:
             plugin_exec_enabled=plugin_exec_enabled,
             plugin_exec_max_rounds=plugin_exec_max_rounds,
             plugin_exec_timeout=plugin_exec_timeout,
+            search_wallclock_timeout=search_wallclock_timeout,
+            search_no_tool_turns_limit=search_no_tool_turns_limit,
             sticker_enabled=sticker_enabled,
             sticker_autosave=sticker_autosave,
             sticker_max_count=sticker_max_count,
