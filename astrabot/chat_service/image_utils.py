@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 
+import httpx
+
 from astrabot.chat_service.http_client import (
     DEFAULT_TIMEOUT,
     get_http_client,
@@ -72,3 +74,24 @@ async def download_image_base64(url: str, timeout: int = IMAGE_TIMEOUT) -> str |
     if raw is None:
         return None
     return base64.b64encode(raw).decode("utf-8")
+
+
+async def download_image_via_proxy(url: str, timeout: int = IMAGE_TIMEOUT) -> bytes | None:
+    """专供表情包远程图使用：显式走系统代理（trust_env）下载。
+
+    表情包图源在 GitHub raw（国内直连被墙），但共享客户端默认直连，
+    以免把 DeepSeek/腾讯 CDN 等付费/核心调用绑到代理那一跳。这里只为
+    「可选的表情包发送」走代理：代理不可用时软失败返回 None，调用方降级
+    为只发文字，不影响回复送达。
+    """
+    try:
+        async with httpx.AsyncClient(
+            timeout=timeout, follow_redirects=True, trust_env=True
+        ) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            return resp.content
+    except Exception as e:
+        kind = "timeout" if "Timeout" in type(e).__name__ else type(e).__name__
+        logger.error(f"Failed to download sticker via proxy ({kind}) {url}: {e}")
+        return None

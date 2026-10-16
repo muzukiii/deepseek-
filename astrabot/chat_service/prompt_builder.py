@@ -91,6 +91,10 @@ def build_main_prompt(
         "再回应最后那条消息。不要重复你之前已经说过的话，"
         "也不要突然跳到无关话题。"
     )
+    parts.append(
+        "【长度要求】每次回复控制在 50 词左右（中文约 50 字），"
+        "像群友随手接话一样简短自然，不要长篇大论、不要罗列。"
+    )
     parts.append("")
     parts.append(trigger_marker)
 

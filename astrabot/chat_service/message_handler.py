@@ -8,6 +8,7 @@ import re
 import sqlite3
 import time
 from datetime import datetime
+from pathlib import Path
 
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, MessageSegment
 
@@ -20,7 +21,10 @@ from astrabot.chat_service.history_manager import (
     trim_history,
     set_image_descriptions,
 )
-from astrabot.chat_service.image_utils import download_image_base64
+from astrabot.chat_service.image_utils import (
+    download_image_base64,
+    download_image_via_proxy,
+)
 from astrabot.chat_service import mood
 from astrabot.chat_service.memory_manager import (
     is_user_ignored,
@@ -505,12 +509,13 @@ async def _reply_flow(
 
     history_image_map = _collect_images_from_history(history, max_images=3)
     if history_image_map:
-        # 历史里只存了 URL，识别时按需重新下载（base64 不落库以免撑爆数据库）
-        all_b64: list[str] = []
-        for _, _, url in history_image_map:
-            got = await download_image_base64(url)
-            if got:
-                all_b64.append(got)
+        # 历史里只存了 URL，识别时按需重新下载（base64 不落库以免撑爆数据库）。
+        # 并发下载，避免串行叠加网络/CDN 超时把整轮拖慢。
+        downloaded = await asyncio.gather(
+            *(download_image_base64(url) for _, _, url in history_image_map),
+            return_exceptions=False,
+        )
+        all_b64: list[str] = [got for got in downloaded if got]
         ctx = "".join(
             f"{m.get('user_name','?')}：{m.get('message','')}\n"
             for m in history[-3:]
@@ -1000,15 +1005,27 @@ async def _send_reply(
         segments.insert(0, MessageSegment.reply(event.message_id))
 
     message = segments[0] if len(segments) == 1 else segments
-    image_url = await resolve_sticker((reply_json or {}).get("sticker_id"))
-    if image_url:
-        if not isinstance(message, list):
-            message = [message]
-        try:
-            message.append(MessageSegment.image(image_url))
-        except Exception as e:
-            logger.warning(f"Failed to attach sticker {image_url}: {e}")
+    # 先只发文字：保证即使表情包远程图抓取失败，回复也已送达。
     await bot.send_group_msg(group_id=group_id, message=message)
+
+    # 表情包单独一条发送：远程 URL 拉取失败只记警告，不影响上面的文字。
+    image_ref = await resolve_sticker((reply_json or {}).get("sticker_id"))
+    if image_ref:
+        try:
+            # 统一转成内联字节再发：远程图由 AstraBot 侧下载，避免 SnowLuma
+            # 去抓 GitHub raw 远程 URL 而 "fetch failed"（本地库则直接读字节）。
+            if isinstance(image_ref, Path):
+                payload = image_ref.read_bytes()
+            elif isinstance(image_ref, str) and image_ref.startswith(("http://", "https://")):
+                payload = await download_image_via_proxy(image_ref)
+            else:
+                payload = image_ref
+            if payload:
+                await bot.send_group_msg(
+                    group_id=group_id, message=MessageSegment.image(payload)
+                )
+        except Exception as e:
+            logger.warning(f"Failed to send sticker {image_ref}: {e}")
 
     if record_reply:
         config = get_config()

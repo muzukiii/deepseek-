@@ -44,6 +44,7 @@ async def chat(
     messages: list[dict],
     response_format: str | None = None,
     reasoning: bool = False,
+    max_tokens: int | None = None,
     timeout: int = 30,
 ) -> dict:
     protocol_upper = protocol.upper()
@@ -61,6 +62,8 @@ async def chat(
             kwargs["response_format"] = {"type": "json_object"}
         if reasoning:
             kwargs["reasoning_effort"] = "high"
+        if max_tokens:
+            kwargs["max_tokens"] = max_tokens
         response = await client.chat.completions.create(**kwargs)
         msg = response.choices[0].message
         content = msg.content or ""
@@ -392,6 +395,7 @@ async def generate_reply(
                     messages=messages,
                     response_format="json_object",
                     reasoning=use_reasoning,
+                    max_tokens=config.chat_max_tokens,
                     timeout=30,
                 )
                 content = result.get("content", "")

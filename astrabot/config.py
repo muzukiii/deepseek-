@@ -104,6 +104,10 @@ class Config:
     # 达到上限后的冷却秒数，期满自动恢复（0 = 只靠别人插话恢复）
     reply_streak_cooldown: int = 300
 
+    # 单次回复的 max_tokens 硬顶：压低输出长度以缩短生成延迟（延迟≈与输出 token 成正比）。
+    # 需为 JSON 结构留余量，过小会截断 JSON 导致解析失败。
+    chat_max_tokens: int = 512
+
     # 生气冷落：模型判定被某人惹到时，短暂无视对方（默认 10 分钟）
     mood_enabled: bool = True
     mood_angry_seconds: int = 600
@@ -284,6 +288,7 @@ class Config:
 
         max_reply_streak = _int_env("max_reply_streak", 3, 0, 50)
         reply_streak_cooldown = _int_env("reply_streak_cooldown", 300, 0, 86400)
+        chat_max_tokens = _int_env("chat_max_tokens", 512, 64, 8000)
         mood_enabled = _bool_env("mood_enabled", True)
         mood_angry_seconds = _int_env("mood_angry_seconds", 600, 30, 86400)
         mood_ignore_at = _bool_env("mood_ignore_at", True)
@@ -326,6 +331,7 @@ class Config:
             ignore_users=ignore_users,
             max_reply_streak=max_reply_streak,
             reply_streak_cooldown=reply_streak_cooldown,
+            chat_max_tokens=chat_max_tokens,
             mood_enabled=mood_enabled,
             mood_angry_seconds=mood_angry_seconds,
             mood_ignore_at=mood_ignore_at,
