@@ -1001,6 +1001,16 @@ async def _send_reply(
 
     segments: list = []
     _append_with_at(segments, joined)
+
+    # 仅当这条触发消息确实 @ 了机器人时，才把 @ 带回给发送者；平时（关键词、
+    # 主动接话等）不 @，避免热闹群里刷屏。模型若已 @ 了同一人则不重复插。
+    triggered_by_at = any(
+        seg.type == "at" and str(seg.data.get("qq")) == str(self_id)
+        for seg in event.get_message()
+    )
+    if triggered_by_at and f"[at:{event.user_id}]" not in joined:
+        segments.insert(0, MessageSegment.at(event.user_id))
+
     if is_reply_to:
         segments.insert(0, MessageSegment.reply(event.message_id))
 
