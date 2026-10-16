@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from datetime import datetime
@@ -16,6 +17,10 @@ from astrabot.logmanager.logger import logger
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 USAGE_DB = DATA_DIR / "usage.jsonl"
+
+# 活动文件超过该大小即轮转为时间戳归档，避免 usage.jsonl 无界增长、
+# 并让 summary() 的读取成本保持在有界窗口内。
+MAX_USAGE_FILE_BYTES = 1_000_000
 
 # DeepSeek 峰时价格（美元 / 1M tokens），用于估算花费
 _PRICE = {
@@ -49,6 +54,25 @@ def _estimate_cost(usage: dict) -> float:
     )
 
 
+def _rotate_if_needed() -> None:
+    """活动文件超限时轮转：usage.jsonl -> usage-<ts>.jsonl。
+
+    调用方需持有 _lock。os.replace 原子，跨进程也不会写出半个文件。
+    """
+    try:
+        if USAGE_DB.is_file() and USAGE_DB.stat().st_size > MAX_USAGE_FILE_BYTES:
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            archive = DATA_DIR / f"usage-{stamp}.jsonl"
+            n = 1
+            while archive.exists():
+                archive = DATA_DIR / f"usage-{stamp}-{n}.jsonl"
+                n += 1
+            os.replace(USAGE_DB, archive)
+            logger.debug(f"Rotated usage log to {archive.name}")
+    except Exception as e:
+        logger.debug(f"Usage log rotation skipped: {e}")
+
+
 def record(
     *,
     kind: str,
@@ -79,6 +103,7 @@ def record(
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         with _lock:
+            _rotate_if_needed()
             with USAGE_DB.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception as e:  # 统计失败不应影响主流程
