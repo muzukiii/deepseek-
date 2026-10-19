@@ -7,9 +7,14 @@ from datetime import datetime
 
 from nonebot.adapters.onebot.v11 import Bot, MessageSegment, PrivateMessageEvent
 
-from astrabot.chat_service.ai_client import generate_reply
+from astrabot.chat_service.ai_client import analyze_images, generate_reply
 from astrabot.chat_service.history_manager import append_message, get_recent_messages, trim_history
-from astrabot.chat_service.prompt_builder import build_main_prompt, format_history
+from astrabot.chat_service.image_utils import download_image_base64
+from astrabot.chat_service.prompt_builder import (
+    build_image_analysis_prompt,
+    build_main_prompt,
+    format_history,
+)
 from astrabot.chat_service.sticker_gallery import sticker_prompt_catalog, sticker_url
 from astrabot.config import get_config
 from astrabot.logmanager.logger import logger
@@ -21,9 +26,24 @@ async def handle_private_message(bot: Bot, event: PrivateMessageEvent):
     conversation_id = -abs(user_id)
     user_name = event.sender.card or event.sender.nickname or str(user_id)
     text = event.get_plaintext().strip()
-    if not text:
-        text = "[图片]" if any(seg.type == "image" for seg in event.get_message()) else ""
-    if not text:
+
+    # 收集图片并下载：此前私聊只把图片记作字符串 "[图片]"，
+    # 从不下载也不识别，导致机器人对私聊图片完全"看不见"，
+    # 只能凭上文瞎猜（日志思维链里出现过 "Another image, no description"）。
+    images_b64: list[str] = []
+    image_count = 0
+    for seg in event.get_message():
+        if seg.type != "image":
+            continue
+        image_count += 1
+        url = seg.data.get("url", "")
+        if not url:
+            continue
+        got = await download_image_base64(url)
+        if got:
+            images_b64.append(got)
+
+    if not text and image_count == 0:
         return
 
     await append_message(conversation_id, {
@@ -33,9 +53,28 @@ async def handle_private_message(bot: Bot, event: PrivateMessageEvent):
         "user_name": user_name,
         "message": text,
         "msg_type": "user",
-        "segments": [{"type": "text", "text": text}],
+        # 图片只留占位，base64 不落库（与群聊一致，避免数据库膨胀）
+        "segments": [{"type": "text", "text": text}]
+        + [{"type": "image"} for _ in range(image_count)],
     })
     history = await get_recent_messages(conversation_id, count=15)
+
+    # 识别本轮私聊里的图片，把描述并入文本，让模型真的"看到"图
+    image_descs: list[str] = []
+    if images_b64:
+        ctx = "".join(
+            f"{m.get('user_name','?')}：{m.get('message','')}\n"
+            for m in history[-3:]
+        )
+        analysis_prompt = build_image_analysis_prompt(config.image_analyzer, ctx)
+        result = await analyze_images(images_b64, analysis_prompt)
+        image_descs = [v for _, v in sorted(result.items()) if v]
+        if image_descs:
+            desc_text = "；".join(image_descs)
+            text = f"{text} [图片][图片描述：{desc_text}]".strip() if text else f"[图片][图片描述：{desc_text}]"
+        else:
+            logger.debug(f"Private image analysis returned nothing for user {user_id}")
+
     catalog = await sticker_prompt_catalog(query=text)
     extra_style = config.extra_style
     if catalog:
