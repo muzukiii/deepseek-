@@ -33,6 +33,7 @@ def build_main_prompt(
     current_time: str = "",
     long_term_memory: str = "",
     relevant_facts: str = "",
+    persona: str = "",
 ) -> str:
     parts = [
         f"你的名字是{config.name_cn}，英文名是{config.name}，你的设定是{config.person_setting}。",
@@ -48,6 +49,12 @@ def build_main_prompt(
         "除此之外，有一些额外的要求需要你注意：",
         config.extra_style,
     ]
+
+    # 人设覆盖段紧跟 extra_style：基础设定里语气要求和协议规则是同一段文字，
+    # 只有排在后面并显式声明"只覆盖性格语气"，才压得住上面那段而不带走机制规则。
+    if persona:
+        parts.append("")
+        parts.append(persona)
 
     if plugin_section:
         parts.append("")

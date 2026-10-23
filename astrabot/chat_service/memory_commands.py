@@ -7,6 +7,7 @@
 - /memory facts - 查看最近的事实记忆
 - /memory delete <id> - 删除指定记忆
 - /memory clear - 清空所有事实记忆（保留长期记忆）
+- /人设 - 查看本群人设；/人设 <预设名> - 切换本群人设（预设见 persona_store.PRESETS）
 """
 from __future__ import annotations
 
@@ -26,6 +27,20 @@ _DESTRUCTIVE_RES = (
     re.compile(r"/memory\s+delete\s+\d+", re.IGNORECASE),
     re.compile(r"/删除记忆\s+\d+", re.IGNORECASE),
 )
+
+# /人设、/persona：不带参数=查看，带参数=切换
+_PERSONA_RE = re.compile(r"^/(?:人设|persona)[ \t]*(.*)$", re.IGNORECASE)
+
+
+def requires_whitelist(message: str) -> bool:
+    """需要白名单才能执行的命令（不含破坏性记忆命令，那部分另算）。
+
+    切换人设改的是机器人在**整个群**的说话方式，一条消息就能让全群都
+    被呛，影响面大于删一条记忆；没配白名单时一律 fail-safe 拒绝。
+    光秃秃的 `/人设` 只是查列表，不受限。
+    """
+    m = _PERSONA_RE.match(message.strip())
+    return bool(m and m.group(1).strip())
 
 
 def is_destructive_command(message: str) -> bool:
@@ -105,6 +120,19 @@ def handle_memory_command(
         from astrabot.chat_service.usage_tracker import summary
 
         return True, summary(days=7)
+
+
+    pm = _PERSONA_RE.match(message)
+    if pm:
+        from astrabot.chat_service import persona_store
+
+        arg = pm.group(1).strip()
+        if not arg:
+            return True, persona_store.persona_status(group_id)
+        ok, reply = persona_store.set_persona(group_id, arg)
+        if ok:
+            logger.info(f"User {user_id} set persona '{arg}' in group {group_id}")
+        return True, reply
 
 
     match = re.match(r'/memory\s+delete\s+(\d+)', message)

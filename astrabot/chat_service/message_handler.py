@@ -39,6 +39,7 @@ from astrabot.chat_service.enhanced_memory import (
     build_memory_context,
 )
 
+from astrabot.chat_service.persona_store import persona_directive
 from astrabot.chat_service.plugin_loader import PluginLoader
 from astrabot.chat_service.prompt_builder import (
     build_image_analysis_prompt,
@@ -345,10 +346,13 @@ def _run_command(bot, group_id: int, user_id: str, text: str, config):
     - 配置了 command_allowed_users 时，只有白名单内的 QQ 能执行任意命令；
     - 未配置白名单（空白名单）时，只读/新增类命令仍放行，但破坏性命令
       （删除、清空）一律 fail-safe 拒绝，避免任意群友一键清空记忆。
+    - 切换人设（/人设 X）同样按破坏性对待：它改变的是机器人在整个群的说话
+      方式，影响面比删一条记忆大；只查看列表的 /人设 不受限。
     """
     from astrabot.chat_service.memory_commands import (
         handle_memory_command,
         is_destructive_command,
+        requires_whitelist,
     )
 
     allowed = config.command_allowed_users
@@ -364,6 +368,12 @@ def _run_command(bot, group_id: int, user_id: str, text: str, config):
             "command_allowed_users 未配置（fail-safe 拒绝）"
         )
         return True, "删除/清空记忆需要先配置 command_allowed_users 白名单"
+    elif requires_whitelist(text):
+        logger.warning(
+            f"Command '{text[:20]}' blocked for {user_id}: "
+            "切换人设需要白名单（command_allowed_users 未配置）"
+        )
+        return True, "切换人设会影响整个群，需要先配置 command_allowed_users 白名单"
 
     try:
         return handle_memory_command(int(group_id), str(user_id), text)
@@ -652,6 +662,7 @@ async def _reply_flow(
             current_time=current_time,
             long_term_memory=memory_ctx["long_term"],
             relevant_facts=memory_ctx["facts"],
+            persona=persona_directive(group_id),
         )
         inject_parts = [part for part in [pre_prompt, append_prompt] if part]
         if inject_parts:

@@ -23,6 +23,7 @@ from astrabot.chat_service.message_handler import (
     _get_group_name_map,
     resolve_plain_at,
 )
+from astrabot.chat_service.persona_store import persona_directive
 from astrabot.chat_service.prompt_builder import format_history
 from astrabot.config import get_config
 from astrabot.logmanager.logger import logger
@@ -33,13 +34,16 @@ _POKE_COOLDOWN = 3.0
 _last_poke: dict[tuple[int, str], float] = {}
 
 
-def _build_poke_prompt(user_name: str, user_id: str, history_text: str) -> str:
+def _build_poke_prompt(user_name: str, user_id: str, history_text: str, group_id=None) -> str:
     config = get_config()
+    persona = persona_directive(group_id)
+    persona_block = f"{persona}\n\n" if persona else ""
     return (
         f"你的名字是{config.name_cn}，你的设定是{config.person_setting}。\n\n"
         f"你需要按照如下的格式输出：\n{config.output_style}\n\n"
         f"你的说话风格如下：\n{config.reply_style}\n\n"
         f"除此之外，有一些额外的要求需要你注意：\n{config.extra_style}\n\n"
+        f"{persona_block}"
         "这是最近的聊天记录：\n"
         f"{history_text}\n\n"
         f"{user_name}({user_id}) 刚刚戳了戳你（戳一戳），没有附带任何文字。"
@@ -116,7 +120,7 @@ async def handle_poke(bot: Bot, data: dict) -> None:
         except Exception as e:
             logger.debug(f"Poke: failed to load history: {e}")
 
-    prompt = _build_poke_prompt(user_name, user_id, history_text)
+    prompt = _build_poke_prompt(user_name, user_id, history_text, group_id)
 
     reply_text = ""
     try:

@@ -5,10 +5,19 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from astrabot.chat_service import search_engine as se
+from astrabot.chat_service import usage_tracker
+
+# 记账文件顶到临时目录：run_search 会调 usage_tracker.record，不顶掉的话每跑一次
+# 测试就往真实 data/usage.jsonl 里塞一批 "test-model" 行，污染 /用量 的统计。
+_tmp_ledger_dir = Path(tempfile.mkdtemp(prefix="astrabot-usage-test-"))
+usage_tracker.DATA_DIR = _tmp_ledger_dir
+usage_tracker.USAGE_DB = _tmp_ledger_dir / "usage.jsonl"
 
 
 class ToolCall:
