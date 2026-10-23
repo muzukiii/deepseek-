@@ -208,14 +208,19 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
 
     # 命令消息：交给命令处理器执行，不走 AI 回复流程。
     # 原先一律 return 丢弃，导致 /用量、/memory 等命令从未生效。
-    if plain_text.startswith("/"):
-        handled, reply_text = _run_command(bot, group_id, user_id, plain_text, config)
+    #
+    # 必须先 strip：@机器人时 extract_plain_text 会把 at 段整个剥掉，但把它
+    # 后面的空格留下来了——"@bot /用量" 的 plain_text 是 " /用量"，
+    # 直接 startswith("/") 判定为假，命令于是掉进 AI 流程变成一句闲聊。
+    cmd_text = plain_text.strip()
+    if cmd_text.startswith("/"):
+        handled, reply_text = _run_command(bot, group_id, user_id, cmd_text, config)
         if handled:
             if reply_text:
                 await _send_reply(bot, event, group_id, reply_text)
             return
         # 未识别的命令同样不进入 AI 流程
-        logger.debug(f"Unknown command ignored: {plain_text[:30]}")
+        logger.debug(f"Unknown command ignored: {cmd_text[:30]}")
         return
 
     # 纯文本记忆指令（记住 / 帮我记住 / 请记住 …）：走与斜杠命令相同的
@@ -233,7 +238,7 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
             return
 
     is_at = event.is_tome()
-    is_keyword = any(plain_text.startswith(k) for k in config.keyword) if config.keyword else False
+    is_keyword = any(cmd_text.startswith(k) for k in config.keyword) if config.keyword else False
 
     # 忽略名单：通常是群里的另一个机器人。即使被它 @ 也不回应，
     # 否则两个机器人会陷入无限互相回复。
