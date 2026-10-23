@@ -7,7 +7,7 @@
 - **多 AI 厂商支持** — MiniMax / DeepSeek / SiliconFlow，可配置主备切换
 - **三层记忆系统** — 短期（近期对话上下文）、中期（自动提取的事实按相关性检索）、长期（用户指定记住的内容，始终加载）
 - **插件机制** — 动态加载 `plugins/` 目录下的插件，支持链式执行、提示词注入、跳过 AI 生成
-- **联网搜索** — 多轮搜索 + 网页抓取 + 结果总结，通过 MCP + DeepSeek 工具调用实现
+- **联网搜索** — 多轮搜索 + 网页抓取 + 结果总结，搜索结果来自智谱原生 web_search 接口
 - **图片分析** — 自动识别群聊图片并注入到 AI 上下文
 - **回复概率控制** — 四种概率分别控制普通消息 / @触发 / 回复中搭话 / 回复中被 @ 插入
 - **事实自动提取** — 从群聊对话中自动提取用户信息，形成中期记忆
@@ -48,8 +48,8 @@ AstraBot/
 
 - Python >= 3.10
 - API Key：
-  - **MiniMax** — Token Plan，用于联网搜索 MCP
   - **主聊天模型** — 通过 `API_KEY` 配置，同时用于联网搜索 Agent
+    （智谱端点还顺带提供 `web_search` 联网搜索结果，无需额外密钥）
   - **视觉模型** — 通过 `VISUAL_API_KEY` 配置，用于图像识别
 
 ### 安装
@@ -91,7 +91,7 @@ python -m venv .venv
 cp .env.example .env
 
 # 编辑 .env，填入 API Key 和配置
-# 必填项：MINIMAX_API_KEY, API_KEY, BACK_API_KEY, VISUAL_API_KEY
+# 必填项：API_KEY, BACK_API_KEY, VISUAL_API_KEY
 #          name, name_cn, person_setting, output_style, reply_style, extra_style, image_analyzer
 #          API_PROTOCOL, API_BASE_URL, API_MODEL, BACK_API_PROTOCOL, BACK_API_BASE_URL, BACK_API_MODEL, VISUAL_API_MODEL
 ```

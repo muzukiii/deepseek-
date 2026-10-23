@@ -811,6 +811,10 @@ async def _ai_call_with_search(
 
     search_round = 0
     search_query = reply_json.get("search", "")
+    if search_query and not get_config().search_enabled:
+        # 联网搜索每次触发都是一串付费调用，search_enabled=false 时整条花钱路径直接不走
+        logger.info(f"Search disabled by config, skipping request: {search_query}")
+        search_query = ""
     if search_query and reply_text:
         # 搜索期间先发送已有回复，搜索完成后再次生成补充回复
         await _send_reply(bot, event, group_id, reply_text, reply_json=reply_json, record_reply=True)

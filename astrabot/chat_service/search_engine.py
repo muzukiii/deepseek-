@@ -1,17 +1,15 @@
-"""联网搜索：通过 MCP + DeepSeek tool calling 实现多轮搜索、网页抓取和结果总结"""
+"""联网搜索：智谱原生 web_search 接口 + GLM tool calling 实现多轮搜索、网页抓取和结果总结"""
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 from html.parser import HTMLParser
 
 import httpx
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 from openai import AsyncOpenAI
 
+from astrabot.chat_service import usage_tracker
 from astrabot.chat_service.http_client import get_http_client, request_with_retry
 from astrabot.config import get_config
 from astrabot.logmanager.logger import logger
@@ -26,6 +24,15 @@ _DEFAULT_WALLCLOCK = 120
 # 修复原先该分支不计数导致的无限循环 + 每轮白烧一次付费调用。
 # 可由 config.search_no_tool_turns_limit 覆盖。
 _DEFAULT_NO_TOOL_LIMIT = 2
+# 搜索代理单轮 LLM 调用的超时。与主聊天路径一致取 60s：主模型是推理模型，
+# 且注入搜索结果后 prompt 可达 5k+ token，20s 会稳定超时（实测第三轮必超时）。
+_LLM_TIMEOUT = 60
+# 智谱联网搜索档位：search_std ¥0.01/次，search_pro ¥0.03，sogou_/quark_ ¥0.05。
+# 可由 config.web_search_engine 覆盖。
+_DEFAULT_SEARCH_ENGINE = "search_std"
+# 单条命中结果注入 prompt 的正文上限：智谱 content 可达数千字，5 条 × 多轮
+# 会把上下文撑到不可控，故每条截断（来源链接与标题不截）。
+_PER_RESULT_CAP = 900
 
 TOOLS = [
     {
@@ -121,6 +128,64 @@ def _get_httpx_client(timeout: int = 20) -> httpx.AsyncClient:
     return get_http_client(timeout=timeout)
 
 
+def _record_usage(response, model: str) -> None:
+    """把搜索代理这一轮的 token 记入 usage_tracker。
+
+    以前 search_engine 从不记账，联网开销对账本完全不可见。
+    """
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return
+    try:
+        usage_tracker.record(kind="search", model=model, usage=usage.model_dump())
+    except Exception as e:
+        logger.warning(f"usage record failed: {e}")
+
+
+async def web_search(query: str) -> str:
+    """调用智谱原生联网搜索，把命中结果格式化成纯文本交给模型阅读。
+
+    不抛异常：失败以文本形式返回，搜索代理会据此换关键词重试。
+    """
+    config = get_config()
+    engine = getattr(config, "web_search_engine", "") or _DEFAULT_SEARCH_ENGINE
+    url = config.API_BASE_URL.rstrip("/") + "/web_search"
+    try:
+        resp = await request_with_retry(
+            "POST",
+            url,
+            timeout=20,
+            headers={"Authorization": f"Bearer {config.API_KEY}"},
+            json={"search_engine": engine, "search_query": query, "count": 5},
+        )
+        data = resp.json()
+    except Exception as e:
+        logger.error(f"web_search failed: {e}")
+        return f"web_search failed: {e}"
+
+    results = data.get("search_result") or []
+    if not results:
+        # 鉴权/参数错误的业务码也走 200，统一降级为「无结果」让模型重试
+        logger.warning(f"web_search no results ({engine}): {str(data)[:200]}")
+        return "web_search 没有返回结果，请换一组关键词重试。"
+
+    blocks = []
+    for idx, item in enumerate(results, 1):
+        title = (item.get("title") or "").strip()
+        link = (item.get("link") or "").strip()
+        media = (item.get("media") or "").strip()
+        date = (item.get("publish_date") or "").strip()
+        meta = "｜".join(x for x in (media, date) if x)
+        content = (item.get("content") or "").strip()[:_PER_RESULT_CAP]
+        head = f"[{idx}] {title}"
+        if meta:
+            head += f"（{meta}）"
+        blocks.append(f"{head}\n{content}\n来源: {link}")
+
+    logger.info(f"web_search({query}) -> {len(results)} results via {engine}")
+    return f"「{query}」搜索结果 {len(results)} 条：\n\n" + "\n\n".join(blocks)
+
+
 async def fetch_url(url: str) -> str:
     try:
         resp = await request_with_retry(
@@ -138,155 +203,136 @@ async def fetch_url(url: str) -> str:
 
 
 async def run_search(initial_query: str, context: str) -> dict:
-    """启动搜索代理：通过 MCP 调用 web_search，用 DeepSeek 进行多轮 tool calling 搜索"""
+    """启动搜索代理：用 GLM 多轮 tool calling，联网结果来自智谱 web_search 接口"""
     config = get_config()
     summary_result: dict = {"summary": "", "sources": []}
 
-    http_client = _get_httpx_client(timeout=20)
+    http_client = _get_httpx_client(timeout=_LLM_TIMEOUT)
     client = AsyncOpenAI(
         api_key=config.API_KEY,
         base_url=config.API_BASE_URL,
         http_client=http_client,
     )
-
-    server_params = StdioServerParameters(
-        command="uvx",
-        args=["minimax-coding-plan-mcp", "-y"],
-        env={
-            "MINIMAX_API_KEY": config.MINIMAX_API_KEY,
-            "MINIMAX_API_HOST": config.MINIMAX_API_HOST,
-        },
-    )
+    # 推理档位沿用主聊天 tier1 的设置；搜索代理用的就是同一个 API_MODEL。
+    effort = getattr(config, "reasoning_effort", "") or None
 
     try:
-        logger.debug("Starting MCP stdio client...")
-        async with stdio_client(server_params) as (read, write):
-            logger.debug("MCP stdio client connected")
-            async with ClientSession(read, write) as session:
-                logger.debug("MCP session created, initializing...")
-                await session.initialize()
-                logger.debug("MCP session initialized")
+        messages = [
+            {"role": "system", "content": _build_system_prompt()},
+            {"role": "user", "content": f"用户的问题是：{initial_query}\n\n对话背景：{context}"},
+        ]
 
-                messages = [
-                    {"role": "system", "content": _build_system_prompt()},
-                    {"role": "user", "content": f"用户的问题是：{initial_query}\n\n对话背景：{context}"},
-                ]
+        tool_calls_count = 0
+        no_tool_turns = 0
 
-                tool_calls_count = 0
-                no_tool_turns = 0
+        # 墙钟预算与早停阈值可经 config/.env 调；缺省走安全值。
+        wallclock = getattr(config, "search_wallclock_timeout", _DEFAULT_WALLCLOCK)
+        no_tool_limit = max(1, getattr(config, "search_no_tool_turns_limit", _DEFAULT_NO_TOOL_LIMIT))
 
-                # 墙钟预算与早停阈值可经 config/.env 调；缺省走安全值。
-                wallclock = getattr(config, "search_wallclock_timeout", _DEFAULT_WALLCLOCK)
-                no_tool_limit = max(1, getattr(config, "search_no_tool_turns_limit", _DEFAULT_NO_TOOL_LIMIT))
-
-                try:
-                    async with asyncio.timeout(wallclock):
-                        while tool_calls_count < MAX_TOOL_CALLS:
-                            response = await client.chat.completions.create(
-                                model=config.API_MODEL,
-                                messages=messages,
-                                tools=TOOLS,
-                                timeout=20,
-                            )
-
-                            msg = response.choices[0].message
-
-                            if not msg.tool_calls:
-                                # 模型只回文本、不调 respond 工具时，原先直接 continue 且不计数，
-                                # 会无限循环、每轮白烧一次付费调用 → 连续若干轮即判定其已答完并早停。
-                                messages.append({"role": "assistant", "content": msg.content or ""})
-                                no_tool_turns += 1
-                                if no_tool_turns >= no_tool_limit:
-                                    logger.info(
-                                        f"Search agent: {no_tool_turns} consecutive no-tool turns, "
-                                        "ending search early with best-effort summary"
-                                    )
-                                    break
-                                continue
-                            no_tool_turns = 0
-
-                            assistant_msg = {
-                                "role": "assistant",
-                                "content": msg.content or "",
-                                "tool_calls": [
-                                    {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                                    for tc in msg.tool_calls
-                                ],
-                            }
-                            messages.append(assistant_msg)
-
-                            answer_ready = False
-                            for tc in msg.tool_calls:
-                                tool_calls_count += 1
-                                name = tc.function.name
-                                args = json.loads(tc.function.arguments)
-
-                                if name == "respond":
-                                    msg_text = args.get("message", "")
-                                    logger.info(f"Search agent: respond({len(msg_text)} chars)")
-                                    logger.debug(f"Respond content: {msg_text[:500]}")
-                                    summary_result["summary"] = msg_text
-                                    answer_ready = True
-                                    break
-
-                                if name == "web_search":
-                                    query = args["query"]
-                                    logger.info(f"Search agent: web_search({query})")
-                                    try:
-                                        result = await session.call_tool("web_search", arguments={"query": query})
-                                        raw_text = result.content[0].text if hasattr(result.content[0], "text") else str(result.content[0])
-                                        result_text = raw_text
-                                    except Exception as e:
-                                        logger.error(f"web_search failed: {e}")
-                                        result_text = f"web_search failed: {e}"
-                                elif name == "fetch_url":
-                                    url = args["url"]
-                                    logger.info(f"Search agent: fetch_url({url})")
-                                    result_text = await fetch_url(url)
-                                else:
-                                    result_text = f"Unknown tool: {name}"
-
-                                messages.append({
-                                    "role": "tool",
-                                    "tool_call_id": tc.id,
-                                    "content": result_text,
-                                })
-
-                            if answer_ready:
-                                break
-
-                        if not summary_result["summary"]:
-                            # 轮数用尽 / 早停仍无 respond：强制一次总结兜底。
-                            logger.warning(f"Search agent reached max tool calls ({MAX_TOOL_CALLS}), forcing summary")
-                            force_prompt = "你已进行多轮搜索，请根据已获取的信息，用 respond 工具给出最终总结回答。"
-                            messages.append({"role": "user", "content": force_prompt})
-                            response = await client.chat.completions.create(
-                                model=config.API_MODEL,
-                                messages=messages,
-                                tools=TOOLS,
-                                timeout=20,
-                            )
-                            msg = response.choices[0].message
-                            if msg.tool_calls:
-                                for tc in msg.tool_calls:
-                                    if tc.function.name == "respond":
-                                        forced = json.loads(tc.function.arguments).get("message", "")
-                                        logger.info(f"Search agent force respond ({len(forced)} chars)")
-                                        logger.debug(f"Forced respond content: {forced[:500]}")
-                                        summary_result["summary"] = forced
-                            elif msg.content:
-                                logger.info(f"Search agent force respond (text, {len(msg.content)} chars)")
-                                summary_result["summary"] = msg.content
-                except TimeoutError:
-                    # 超过墙钟预算：放弃后续轮次，返回当前 best-effort 结果（可能为空，调用方已能降级）。
-                    logger.warning(
-                        f"Search agent exceeded wall-clock budget {wallclock}s; "
-                        "returning best-effort summary"
+        try:
+            async with asyncio.timeout(wallclock):
+                while tool_calls_count < MAX_TOOL_CALLS:
+                    response = await client.chat.completions.create(
+                        model=config.API_MODEL,
+                        messages=messages,
+                        tools=TOOLS,
+                        reasoning_effort=effort,
+                        timeout=_LLM_TIMEOUT,
                     )
+                    _record_usage(response, config.API_MODEL)
 
-    except* Exception as eg:
-        # Python 3.11+ ExceptionGroup：MCP stdio 关闭时可能抛出多异常
-        import traceback
-        logger.error(f"Search agent full traceback:\n{''.join(traceback.format_exception(type(eg), eg, eg.__traceback__))}")
+                    msg = response.choices[0].message
+
+                    if not msg.tool_calls:
+                        # 模型只回文本、不调 respond 工具时，原先直接 continue 且不计数，
+                        # 会无限循环、每轮白烧一次付费调用 → 连续若干轮即判定其已答完并早停。
+                        messages.append({"role": "assistant", "content": msg.content or ""})
+                        no_tool_turns += 1
+                        if no_tool_turns >= no_tool_limit:
+                            logger.info(
+                                f"Search agent: {no_tool_turns} consecutive no-tool turns, "
+                                "ending search early with best-effort summary"
+                            )
+                            break
+                        continue
+                    no_tool_turns = 0
+
+                    assistant_msg = {
+                        "role": "assistant",
+                        "content": msg.content or "",
+                        "tool_calls": [
+                            {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                            for tc in msg.tool_calls
+                        ],
+                    }
+                    messages.append(assistant_msg)
+
+                    answer_ready = False
+                    for tc in msg.tool_calls:
+                        tool_calls_count += 1
+                        name = tc.function.name
+                        args = json.loads(tc.function.arguments)
+
+                        if name == "respond":
+                            msg_text = args.get("message", "")
+                            logger.info(f"Search agent: respond({len(msg_text)} chars)")
+                            logger.debug(f"Respond content: {msg_text[:500]}")
+                            summary_result["summary"] = msg_text
+                            answer_ready = True
+                            break
+
+                        if name == "web_search":
+                            result_text = await web_search(args["query"])
+                        elif name == "fetch_url":
+                            url = args["url"]
+                            logger.info(f"Search agent: fetch_url({url})")
+                            result_text = await fetch_url(url)
+                        else:
+                            result_text = f"Unknown tool: {name}"
+
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": result_text,
+                        })
+
+                    if answer_ready:
+                        break
+
+                if not summary_result["summary"]:
+                    # 轮数用尽 / 早停仍无 respond：强制一次总结兜底。
+                    logger.warning(f"Search agent reached max tool calls ({MAX_TOOL_CALLS}), forcing summary")
+                    force_prompt = "你已进行多轮搜索，请根据已获取的信息，用 respond 工具给出最终总结回答。"
+                    messages.append({"role": "user", "content": force_prompt})
+                    response = await client.chat.completions.create(
+                        model=config.API_MODEL,
+                        messages=messages,
+                        tools=TOOLS,
+                        reasoning_effort=effort,
+                        timeout=_LLM_TIMEOUT,
+                    )
+                    _record_usage(response, config.API_MODEL)
+                    msg = response.choices[0].message
+                    if msg.tool_calls:
+                        for tc in msg.tool_calls:
+                            if tc.function.name == "respond":
+                                forced = json.loads(tc.function.arguments).get("message", "")
+                                logger.info(f"Search agent force respond ({len(forced)} chars)")
+                                logger.debug(f"Forced respond content: {forced[:500]}")
+                                summary_result["summary"] = forced
+                    elif msg.content:
+                        logger.info(f"Search agent force respond (text, {len(msg.content)} chars)")
+                        summary_result["summary"] = msg.content
+        except TimeoutError:
+            # 超过墙钟预算：放弃后续轮次，返回当前 best-effort 结果（可能为空，调用方已能降级）。
+            logger.warning(
+                f"Search agent exceeded wall-clock budget {wallclock}s; "
+                "returning best-effort summary"
+            )
+
+    except Exception:
+        # 搜索代理整体失败：返回空 summary，调用方本来就会降级为不补充回复。
+        # 带 traceback——这条路径不常走，出错时不留线索很难定位。
+        logger.exception("Search agent failed")
 
     return summary_result

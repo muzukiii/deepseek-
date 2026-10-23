@@ -1,5 +1,5 @@
-"""C-4 搜索代理护栏回归测试：早停 / 墙钟超时 / respond / 轮数用尽四条路径。
-纯打桩，不联网、不调真实 LLM/MCP。无 pytest 时可 `python tests/test_search_guards.py` 直跑。"""
+"""搜索代理护栏回归测试：早停 / 墙钟超时 / respond / 轮数用尽 / token 记账。
+纯打桩，不联网、不调真实 LLM。无 pytest 时可 `python tests/test_search_guards.py` 直跑。"""
 
 import asyncio
 import json
@@ -23,17 +23,24 @@ class Msg:
         self.content = content
 
 
+class _Usage:
+    """模仿 openai 的 Usage 对象（search_engine 只用到 model_dump()）。"""
+
+    def model_dump(self):
+        return {"prompt_tokens": 100, "completion_tokens": 20}
+
+
 class Resp:
-    def __init__(self, msg):
+    def __init__(self, msg, usage=None):
         self.choices = [type("C", (), {"message": msg})()]
+        self.usage = usage if usage is not None else _Usage()
 
 
 class FakeConfig:
     API_MODEL = "test-model"
     API_KEY = "k"
     API_BASE_URL = "http://x"
-    MINIMAX_API_KEY = "mk"
-    MINIMAX_API_HOST = "mh"
+    web_search_engine = "search_std"
 
     def __init__(self, **kw):
         for k, v in kw.items():
@@ -61,35 +68,16 @@ class FakeClient:
         self.chat = type("Chat", (), {"completions": comp})()
 
 
-class FakeContent:
-    def __init__(self, text):
-        self.text = text
-
-
-class FakeSession:
-    async def initialize(self):
-        pass
-
-    async def call_tool(self, name, arguments):
-        return type("R", (), {"content": [FakeContent(f"[{name}:{arguments.get('query', '')}]")]})()
-
-
-class _CM:
-    def __init__(self, val):
-        self._val = val
-
-    async def __aenter__(self):
-        return self._val
-
-    async def __aexit__(self, *a):
-        return False
-
-
-def _patch(client, config):
+def _patch(client, config, search_log=None):
     se.AsyncOpenAI = lambda **kw: client
     se.get_config = lambda: config
-    se.stdio_client = lambda sp: _CM(("r", "w"))
-    se.ClientSession = lambda r, w: _CM(FakeSession())
+
+    async def _web_search(query):
+        if search_log is not None:
+            search_log.append(query)
+        return f"[搜索结果 {query}]"
+
+    se.web_search = _web_search
 
     async def _fetch(url):
         return "fetched"
@@ -132,10 +120,33 @@ def test_max_tool_calls_forces_summary():
         [Msg(content=None, tool_calls=[ToolCall("web_search", {"query": "x"}, f"t{i}")]) for i in range(n)]
         + [Msg(content=None, tool_calls=[ToolCall("respond", {"message": "DONE"}, "last")])]
     )
-    _patch(client, FakeConfig(search_wallclock_timeout=10))
+    seen: list[str] = []
+    _patch(client, FakeConfig(search_wallclock_timeout=10), search_log=seen)
     res = asyncio.run(se.run_search("q", "ctx"))
     assert res["summary"] == "DONE", res
     assert client.calls == n + 1, client.calls  # n 轮工具用尽 + 1 次强制总结
+    assert seen == ["x"] * n, seen  # web_search 工具名确实路由到了模块级搜索函数
+
+
+def test_usage_recorded_as_search():
+    # 搜索代理的 token 必须入账，否则联网开销对账本完全不可见。
+    records: list[dict] = []
+    client = FakeClient([Msg(content=None, tool_calls=[ToolCall("respond", {"message": "A"}, "t1")])])
+    _patch(client, FakeConfig())
+
+    def _record(**kw):
+        records.append(kw)
+
+    orig_record = se.usage_tracker.record
+    se.usage_tracker.record = _record
+    try:
+        asyncio.run(se.run_search("q", "ctx"))
+    finally:
+        se.usage_tracker.record = orig_record
+    assert len(records) == 1, records
+    assert records[0]["kind"] == "search", records[0]
+    assert records[0]["model"] == "test-model", records[0]
+    assert records[0]["usage"]["prompt_tokens"] == 100, records[0]
 
 
 if __name__ == "__main__":
@@ -143,4 +154,5 @@ if __name__ == "__main__":
     test_no_tool_early_stop()
     test_wallclock_timeout()
     test_max_tool_calls_forces_summary()
+    test_usage_recorded_as_search()
     print("ALL SEARCH GUARD TESTS PASSED")

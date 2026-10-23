@@ -146,14 +146,17 @@ class Config:
     # 单次调用已有 20s 超时，这里约束的是最坏 10 轮叠加成的分钟级耗时与失控循环。
     search_wallclock_timeout: int = 120
     search_no_tool_turns_limit: int = 2
+    # 联网搜索总开关：搜索代理每次触发都是一串付费调用（GLM 轮次 + 智谱按次计费），
+    # 关掉即完全不走这条花钱路径，模型即便在回复里写了 search 也不会执行。
+    search_enabled: bool = True
+    # 智谱联网搜索档位：search_std ¥0.01/次、search_pro ¥0.03、sogou_/quark_ ¥0.05。
+    web_search_engine: str = "search_std"
 
     # 四种回复概率，分别对应：普通消息 / @触发 / 回复中继续搭话 / 回复中被@插入
     reply_rate: float = 0.1
     reply_rate_at: float = 1.0
     reply_rate_in_reply: float = 0.0
     reply_rate_at_in_reply: float = 1.0
-
-    MINIMAX_API_KEY: str = ""
 
     API_PROTOCOL: str = ""
     API_BASE_URL: str = ""
@@ -179,7 +182,6 @@ class Config:
     VISUAL_API_PROVIDER: str = "SILICONFLOW"
     VISUAL_API_MODEL: str = ""
 
-    MINIMAX_API_HOST: str = "https://api.minimaxi.com"
     system_prompt: str = ""
 
     @classmethod
@@ -329,6 +331,8 @@ class Config:
 
         search_wallclock_timeout = _int_env("search_wallclock_timeout", 120, 5, 600)
         search_no_tool_turns_limit = _int_env("search_no_tool_turns_limit", 2, 1, 10)
+        search_enabled = _bool_env("search_enabled", True)
+        web_search_engine = str(raw.get("web_search_engine", "")).strip() or "search_std"
 
         summary_enabled = _bool_env("summary_enabled", True)
         summary_trigger_messages = _int_env("summary_trigger_messages", 40, 10, 500)
@@ -379,6 +383,8 @@ class Config:
             plugin_exec_timeout=plugin_exec_timeout,
             search_wallclock_timeout=search_wallclock_timeout,
             search_no_tool_turns_limit=search_no_tool_turns_limit,
+            search_enabled=search_enabled,
+            web_search_engine=web_search_engine,
             summary_enabled=summary_enabled,
             summary_trigger_messages=summary_trigger_messages,
             summary_batch_messages=summary_batch_messages,
@@ -406,7 +412,6 @@ class Config:
             reply_rate_at=floats["reply_rate_at"],
             reply_rate_in_reply=floats["reply_rate_in_reply"],
             reply_rate_at_in_reply=floats["reply_rate_at_in_reply"],
-            MINIMAX_API_KEY=raw.get("MINIMAX_API_KEY", ""),
             API_PROTOCOL=raw.get("API_PROTOCOL", ""),
             API_BASE_URL=raw.get("API_BASE_URL", ""),
             API_KEY=raw.get("API_KEY", ""),
@@ -423,7 +428,6 @@ class Config:
             VISUAL_API_KEY=raw.get("VISUAL_API_KEY", ""),
             VISUAL_API_PROVIDER=raw.get("VISUAL_API_PROVIDER", "SILICONFLOW"),
             VISUAL_API_MODEL=raw.get("VISUAL_API_MODEL", ""),
-            MINIMAX_API_HOST=raw.get("MINIMAX_API_HOST", "https://api.minimaxi.com"),
             system_prompt=raw.get("system_prompt", ""),
         )
 
