@@ -45,6 +45,7 @@ async def chat(
     reasoning_effort: str | None = None,
     max_tokens: int | None = None,
     timeout: int = 30,
+    usage_kind: str = "chat",
 ) -> dict:
     protocol_upper = protocol.upper()
 
@@ -69,7 +70,7 @@ async def chat(
         reasoning_content = getattr(msg, "reasoning_content", None)
         usage = getattr(response, "usage", None)
         usage_tracker.record(
-            kind="chat",
+            kind=usage_kind,
             model=model,
             usage=usage.model_dump() if usage is not None else None,
         )
@@ -97,7 +98,7 @@ async def chat(
         anth_usage = getattr(message, "usage", None)
         if anth_usage is not None:
             usage_tracker.record(
-                kind="chat",
+                kind=usage_kind,
                 model=model,
                 usage={
                     "prompt_tokens": getattr(anth_usage, "input_tokens", 0),
@@ -358,6 +359,50 @@ def _is_retryable_error(exc: Exception) -> bool:
     return True
 
 
+def _provider_chain(config) -> list[tuple[str, str, str, str, str]]:
+    """按 主→备→三 顺序返回可用档位：(protocol, base_url, api_key, model, reasoning_effort)。"""
+    providers = [(config.API_PROTOCOL, config.API_BASE_URL, config.API_KEY, config.API_MODEL,
+                  config.reasoning_effort)]
+    if config.BACK_API_KEY and config.BACK_API_MODEL and config.BACK_API_BASE_URL:
+        providers.append((config.BACK_API_PROTOCOL, config.BACK_API_BASE_URL, config.BACK_API_KEY, config.BACK_API_MODEL,
+                          config.back_reasoning_effort))
+    if config.THIRD_API_KEY and config.THIRD_API_MODEL and config.THIRD_API_BASE_URL:
+        providers.append((config.THIRD_API_PROTOCOL, config.THIRD_API_BASE_URL, config.THIRD_API_KEY, config.THIRD_API_MODEL,
+                          config.third_reasoning_effort))
+    return providers
+
+
+async def generate_summary(prompt: str, max_tokens: int) -> str:
+    """生成前情摘要（纯文本）。失败返回空串，由调用方保持水位线不变、下轮再试。
+
+    摘要走与回复相同的回退链，但它是后台任务，所以每档只试一次：某档失败就换
+    下一档，全挂了就这轮不压缩，绝不拖慢或影响任何正在进行的回复。
+    """
+    config = get_config()
+    messages = [{"role": "user", "content": prompt}]
+
+    for protocol, base_url, api_key, model, effort in _provider_chain(config):
+        try:
+            result = await chat(
+                protocol=protocol,
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                messages=messages,
+                reasoning_effort=effort or None,
+                max_tokens=max_tokens,
+                timeout=60,
+                usage_kind="summary",
+            )
+            content = (result.get("content") or "").strip()
+            if content:
+                return content
+            logger.warning(f"Empty summary response from {model}, trying next provider")
+        except Exception as e:
+            logger.warning(f"Summary call failed on {model}: {e}")
+    return ""
+
+
 async def generate_reply(
     prompt: str,
 ) -> tuple[str, dict]:
@@ -369,14 +414,7 @@ async def generate_reply(
         messages.append({"role": "system", "content": config.system_prompt})
     messages.append({"role": "user", "content": prompt})
 
-    providers = [(config.API_PROTOCOL, config.API_BASE_URL, config.API_KEY, config.API_MODEL,
-                  config.reasoning_effort)]
-    if config.BACK_API_KEY and config.BACK_API_MODEL and config.BACK_API_BASE_URL:
-        providers.append((config.BACK_API_PROTOCOL, config.BACK_API_BASE_URL, config.BACK_API_KEY, config.BACK_API_MODEL,
-                          config.back_reasoning_effort))
-    if config.THIRD_API_KEY and config.THIRD_API_MODEL and config.THIRD_API_BASE_URL:
-        providers.append((config.THIRD_API_PROTOCOL, config.THIRD_API_BASE_URL, config.THIRD_API_KEY, config.THIRD_API_MODEL,
-                          config.third_reasoning_effort))
+    providers = _provider_chain(config)
 
     for protocol, base_url, api_key, model, effort in providers:
         for retry in range(RETRY_LIMIT):

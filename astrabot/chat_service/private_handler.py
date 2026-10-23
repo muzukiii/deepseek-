@@ -8,7 +8,8 @@ from datetime import datetime
 from nonebot.adapters.onebot.v11 import Bot, MessageSegment, PrivateMessageEvent
 
 from astrabot.chat_service.ai_client import analyze_images, generate_reply
-from astrabot.chat_service.history_manager import append_message, get_recent_messages, trim_history
+from astrabot.chat_service.history_manager import append_message, select_context, trim_history
+from astrabot.chat_service.history_summarizer import schedule_summarize
 from astrabot.chat_service.image_utils import download_image_base64
 from astrabot.chat_service.prompt_builder import (
     build_image_analysis_prompt,
@@ -57,7 +58,15 @@ async def handle_private_message(bot: Bot, event: PrivateMessageEvent):
         "segments": [{"type": "text", "text": text}]
         + [{"type": "image"} for _ in range(image_count)],
     })
-    history = await get_recent_messages(conversation_id, count=15)
+    # 私聊最能聊长（一对一），也最吃"超出窗口的记忆"，所以和群聊一样走 select_context：
+    # 只有它会带上 pinned 的前情摘要，get_recent_messages 只会看最近若干条。
+    # 同时排除本轮消息，避免它在历史与触发行里各出现一次。
+    history = await select_context(
+        conversation_id,
+        max_messages=config.history_messages,
+        exclude_message_id=event.message_id,
+    )
+    schedule_summarize(conversation_id, config.history_messages, config)
 
     # 识别本轮私聊里的图片，把描述并入文本，让模型真的"看到"图
     image_descs: list[str] = []

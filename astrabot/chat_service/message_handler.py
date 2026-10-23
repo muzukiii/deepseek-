@@ -21,6 +21,7 @@ from astrabot.chat_service.history_manager import (
     trim_history,
     set_image_descriptions,
 )
+from astrabot.chat_service.history_summarizer import schedule_summarize
 from astrabot.chat_service.image_utils import (
     download_image_base64,
     download_image_via_proxy,
@@ -201,6 +202,9 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     }
     await append_message(group_id, record)
     await trim_history(group_id)
+    # 摘要放在入库之后、回复判定之前：机器人是否回复都不影响历史一直在长，
+    # 压缩因此不依赖回复；任务本身在后台跑，不占本轮回复耗时。
+    schedule_summarize(group_id, config.history_messages, config)
 
     # 命令消息：交给命令处理器执行，不走 AI 回复流程。
     # 原先一律 return 丢弃，导致 /用量、/memory 等命令从未生效。

@@ -137,6 +137,14 @@ def format_history(
         user_name = msg.get("user_name", "未知")
         segments = msg.get("segments")
 
+        if msg.get("msg_type") == "mid_term_memory":
+            # 摘要行不是"某人说的话"，混在聊天记录里会被当成逐字发言。单独成块，
+            # 并明确标注它只是背景，避免模型照着摘要复述。
+            summary_text = _clean_history_text(msg.get("message", ""))
+            if summary_text:
+                lines.append("【前情提要（更早的对话已压缩，只作背景参考，不要复述）】\n" + summary_text)
+            continue
+
         if segments:
             parts = []
             reply_info = ""
@@ -306,4 +314,37 @@ def build_search_inject_prompt(
         parts.append(new_messages_since_search)
     parts.append("")
     parts.append("请结合这些信息，重新构思回复。")
+    return "\n".join(parts)
+
+
+def build_summary_prompt(
+    old_summary: str,
+    history_text: str,
+    max_chars: int,
+) -> str:
+    """滚动摘要提示词：旧摘要 + 新一段逐字历史 → 一条合并后的新摘要。
+
+    合并式（而不是追加式）是这套机制能突破上下文长度的关键：摘要总长封顶，
+    压缩次数再多也不会让 prompt 变大，但可回溯的历史长度是无限的。
+    """
+    parts = [
+        "你要把群聊的历史压缩成一段“前情提要”，供之后接着聊时参考。",
+        "",
+        "要求：",
+        "1. 用第三人称陈述，不要写成对话稿，不要加标题、前后缀或解释。",
+        f"2. 总长度不超过 {max_chars} 字，宁可精炼也不要堆细节。",
+        "3. 优先保留：参与聊天的人及其关系、正在争论或讨论的话题、已给出的结论与"
+        "承诺、悬而未决的问题、出现过的昵称/梗、以及明显的时间线索（如“明天”“上周”）。",
+        "4. 不要编造历史里没有的信息；无法确定的细节直接省略。",
+        "5. 如果一段内容反复出现（例如同一句玩笑），只记一次。",
+    ]
+    if old_summary:
+        parts.append("")
+        parts.append("已有的前情提要（请与下面的新内容合并成一段，不要简单拼接）：")
+        parts.append(old_summary)
+    parts.append("")
+    parts.append("需要压缩的新内容：")
+    parts.append(history_text)
+    parts.append("")
+    parts.append("直接输出合并后的前情提要正文：")
     return "\n".join(parts)

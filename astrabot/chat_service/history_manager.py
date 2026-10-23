@@ -132,11 +132,15 @@ async def get_recent_messages(group_id: int, count: int = 15) -> list[dict]:
 
 async def trim_history(group_id: int, max_lines: int = 1000):
     conn = _get_db()
+    # 只裁原始消息。摘要行的 time 落在很久之前，一旦被"最近 N 条"裁掉，压缩成果和水位线
+    # 会一起消失，导致那批消息被反复重新压缩。
     conn.execute(
-        """DELETE FROM messages WHERE group_id = ? AND id NOT IN (
-               SELECT id FROM messages WHERE group_id = ? ORDER BY time DESC, id DESC LIMIT ?
+        """DELETE FROM messages WHERE group_id = ? AND msg_type <> ?
+           AND id NOT IN (
+               SELECT id FROM messages WHERE group_id = ? AND msg_type <> ?
+               ORDER BY time DESC, id DESC LIMIT ?
            )""",
-        (group_id, group_id, max_lines),
+        (group_id, MID_TERM_TYPE, group_id, MID_TERM_TYPE, max_lines),
     )
     conn.commit()
 
@@ -169,6 +173,83 @@ async def get_messages_by_type(group_id: int, msg_type: str, limit: int = 50) ->
         (group_id, msg_type, limit),
     )
     return [_row_to_dict(r) for r in reversed(cur.fetchall())]
+
+
+# ---------------------------------------------------------------------------
+# 前情摘要（msg_type='mid_term_memory'）：select_context 早已把这类行 pinned 进
+# 上下文，但此前全仓库没有任何写入方，等于一条空通道。下面补齐读写。
+# 约定：每个群只保留一条滚动摘要；message_id 复用为"已压缩到的 messages.id 水位线"，
+# time 用该批最后一条消息的时间，使摘要按时间自然落在逐字历史之前。
+# ---------------------------------------------------------------------------
+
+MID_TERM_TYPE = "mid_term_memory"
+
+
+async def get_mid_term(group_id: int) -> tuple[str, int]:
+    """返回 (当前摘要文本, 已压缩水位线 messages.id)；没有摘要时为 ("", 0)。"""
+    conn = _get_db()
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT message, message_id FROM messages WHERE group_id = ? AND msg_type = ?"
+        " ORDER BY id DESC LIMIT 1",
+        (group_id, MID_TERM_TYPE),
+    ).fetchone()
+    if not row:
+        return "", 0
+    return row["message"] or "", int(row["message_id"] or 0)
+
+
+async def set_mid_term_memory(group_id: int, text: str, watermark: int, when: int) -> None:
+    """用新的滚动摘要替换旧的那一条（单条覆盖，保证 pinned 体积不随时间增长）。"""
+    conn = _get_db()
+    conn.execute(
+        "DELETE FROM messages WHERE group_id = ? AND msg_type = ?",
+        (group_id, MID_TERM_TYPE),
+    )
+    conn.execute(
+        """INSERT INTO messages (group_id, time, message_id, user_id, user_name, message, msg_type)
+           VALUES (?, ?, ?, '', '前情提要', ?, ?)""",
+        (group_id, when, watermark, text, MID_TERM_TYPE),
+    )
+    conn.commit()
+
+
+async def context_window_boundary(group_id: int, keep_messages: int) -> int | None:
+    """最近窗口里最旧那条 user 消息的 id；比它更早的消息才有压缩资格。
+
+    返回 None 表示窗口还没被填满（或群里只有机器人自己的话），此时不该压缩。
+    """
+    conn = _get_db()
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT id FROM messages WHERE group_id = ? AND msg_type = 'user'"
+        " ORDER BY time DESC, id DESC LIMIT 1 OFFSET ?",
+        (group_id, max(keep_messages - 1, 0)),
+    ).fetchone()
+    return int(row["id"]) if row else None
+
+
+async def count_compressible(group_id: int, after_id: int, before_id: int) -> int:
+    conn = _get_db()
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM messages WHERE group_id = ? AND msg_type IN ('user','bot')"
+        " AND id > ? AND id < ?",
+        (group_id, after_id, before_id),
+    ).fetchone()
+    return int(row["n"]) if row else 0
+
+
+async def get_compressible(group_id: int, after_id: int, before_id: int, limit: int) -> list[dict]:
+    """取一批待压缩的旧消息（同一群内 id 随时间递增，故 id 区间即时间区间）。"""
+    conn = _get_db()
+    conn.row_factory = sqlite3.Row
+    cur = conn.execute(
+        "SELECT * FROM messages WHERE group_id = ? AND msg_type IN ('user','bot')"
+        " AND id > ? AND id < ? ORDER BY time ASC, id ASC LIMIT ?",
+        (group_id, after_id, before_id, limit),
+    )
+    return [_row_to_dict(r) for r in cur.fetchall()]
 
 
 async def select_context(group_id: int, max_messages: int = 15, exclude_message_id: int | None = None) -> list[dict]:

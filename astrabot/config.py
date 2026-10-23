@@ -118,6 +118,17 @@ class Config:
     back_reasoning_effort: str = "low"
     third_reasoning_effort: str = ""
 
+    # 前情滚动摘要：把超出最近窗口（history_messages）的旧消息压成一条摘要常驻上下文，
+    # 使"能回溯多久"与"prompt 有多大"解绑——摘要总长封顶，可回溯历史却不受模型窗口限制。
+    summary_enabled: bool = True
+    # 窗口外积压多少条未压缩消息才触发一次摘要（越大越省钱、回溯越粗）
+    summary_trigger_messages: int = 40
+    # 单次最多压缩多少条，防止长期未压缩时一次性塞爆摘要请求
+    summary_batch_messages: int = 60
+    # 摘要文本长度上限（字）。它直接决定每次请求的固定 token 成本。
+    summary_max_chars: int = 600
+    summary_max_tokens: int = 512
+
     # 生气冷落：模型判定被某人惹到时，短暂无视对方（默认 10 分钟）
     mood_enabled: bool = True
     mood_angry_seconds: int = 600
@@ -319,6 +330,12 @@ class Config:
         search_wallclock_timeout = _int_env("search_wallclock_timeout", 120, 5, 600)
         search_no_tool_turns_limit = _int_env("search_no_tool_turns_limit", 2, 1, 10)
 
+        summary_enabled = _bool_env("summary_enabled", True)
+        summary_trigger_messages = _int_env("summary_trigger_messages", 40, 10, 500)
+        summary_batch_messages = _int_env("summary_batch_messages", 60, 10, 200)
+        summary_max_chars = _int_env("summary_max_chars", 600, 100, 4000)
+        summary_max_tokens = _int_env("summary_max_tokens", 512, 64, 2048)
+
         # 忽略名单：支持 ignore_users=[123,456] 或 123,456
         ignore_raw = raw.get("ignore_users", "")
         ignore_users: set[str] = set()
@@ -362,6 +379,11 @@ class Config:
             plugin_exec_timeout=plugin_exec_timeout,
             search_wallclock_timeout=search_wallclock_timeout,
             search_no_tool_turns_limit=search_no_tool_turns_limit,
+            summary_enabled=summary_enabled,
+            summary_trigger_messages=summary_trigger_messages,
+            summary_batch_messages=summary_batch_messages,
+            summary_max_chars=summary_max_chars,
+            summary_max_tokens=summary_max_tokens,
             sticker_enabled=sticker_enabled,
             sticker_autosave=sticker_autosave,
             sticker_max_count=sticker_max_count,
