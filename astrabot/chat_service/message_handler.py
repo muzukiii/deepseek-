@@ -25,6 +25,7 @@ from astrabot.chat_service.history_summarizer import schedule_summarize
 from astrabot.chat_service.image_utils import (
     download_image_base64,
     download_image_via_proxy,
+    is_image_bytes,
 )
 from astrabot.chat_service import mood
 from astrabot.chat_service.memory_manager import (
@@ -534,7 +535,15 @@ async def _reply_flow(
             *(download_image_base64(url) for _, _, url in history_image_map),
             return_exceptions=False,
         )
-        all_b64: list[str] = [got for got in downloaded if got]
+        # 下载失败的项必须整对剔掉：一旦送进识图的 b64 数量少于 map，模型按
+        # image_1/image_2… 编号返回的描述就会全体错位，挂到别的图上、再被当作
+        # 那张图的表情存进本地库。这里把 (位置, b64) 绑在一起，按序号回查。
+        ok_pairs: list[tuple[tuple[int, int], str]] = [
+            ((msg_idx, seg_idx), b64)
+            for (msg_idx, seg_idx, _), b64 in zip(history_image_map, downloaded)
+            if b64
+        ]
+        all_b64: list[str] = [b64 for _, b64 in ok_pairs]
         ctx = "".join(
             f"{m.get('user_name','?')}：{m.get('message','')}\n"
             for m in history[-3:]
@@ -543,9 +552,12 @@ async def _reply_flow(
         analysis_result = await analyze_images(all_b64, analysis_prompt) if all_b64 else {}
         history_image_descs: dict[tuple[int, int], str] = {}
         desc_by_pos: dict[tuple[int, int], str] = {}
-        for (msg_idx, seg_idx, _), (_, desc) in zip(history_image_map, sorted(analysis_result.items())):
-            history_image_descs[(msg_idx, seg_idx)] = desc
-            desc_by_pos[(msg_idx, seg_idx)] = desc
+        for i, (pos, _) in enumerate(ok_pairs):
+            desc = _vision_desc_at(analysis_result, i)
+            if not desc:
+                continue
+            history_image_descs[pos] = desc
+            desc_by_pos[pos] = desc
 
         # 把描述回写到历史记录，之后同一张图不必重复识别（省钱且更快）
         if desc_by_pos:
@@ -565,15 +577,18 @@ async def _reply_flow(
 
         # 顺手把刚识别过的图存进本地表情库：复用已有的图片与描述，
         # 不额外调用 API，因此不产生花费。
+        # 注意 map 的第三项是 URL 而不是 b64——此前这里直接对它 b64decode，
+        # 于是本地库攒了几十个"base64 解码出来的 URL 文本"，发送必被图床拒。
         if config.sticker_enabled and config.sticker_autosave:
             try:
                 from astrabot.chat_service import sticker_store
 
-                for (_, _, b64), (_, desc) in zip(
-                    history_image_map, sorted(analysis_result.items())
-                ):
+                for pos, b64 in ok_pairs:
+                    desc = history_image_descs.get(pos)
+                    if not desc:
+                        continue
                     raw = sticker_store.image_b64_to_bytes(b64)
-                    if raw and desc:
+                    if raw:
                         sticker_store.save_sticker(
                             raw, desc, max_count=config.sticker_max_count
                         )
@@ -870,6 +885,28 @@ async def _ai_call_with_search(
     return reply_text, reply_json
 
 
+def _vision_desc_at(result: dict, i: int) -> str:
+    """取第 i 张（0 基）识图结果的描述。
+
+    优先按提示词约定的 image_1 / image_2 … 编号取；模型没按约定给键时退化成
+    "排序后按位置取"（旧行为），保证不会因为键名变化就整批丢掉描述。
+    """
+    if not isinstance(result, dict) or not result:
+        return ""
+    value = result.get(f"image_{i + 1}")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    try:
+        keys = sorted(result)
+    except Exception:
+        return ""
+    if i < len(keys):
+        value = result.get(keys[i])
+        if isinstance(value, str):
+            return value.strip()
+    return ""
+
+
 def _collect_images_from_history(history: list[dict], max_images: int = 3) -> list[tuple[int, int, str]]:
     """从历史消息中倒序收集最近「尚未识别」的图片。
 
@@ -1054,6 +1091,15 @@ async def _send_reply(
                 payload = await download_image_via_proxy(image_ref)
             else:
                 payload = image_ref
+            # 发送前最后一次魔数校验：库里只要混进非图片字节，QQ 图床就会以
+            # error_code=921 拒绝，而日志里只剩一句 ActionFailed，很难归因。
+            # 认不出来就跳过这条表情，文字回复已经发出去了，不受影响。
+            # 只校验字节：字符串可能是调用方直接给的 base64，不能按文件头判。
+            if isinstance(payload, (bytes, bytearray)) and not is_image_bytes(payload):
+                logger.warning(
+                    f"Skipped sticker {image_ref}: not a valid image ({len(payload)} bytes)"
+                )
+                payload = None
             if payload:
                 await bot.send_group_msg(
                     group_id=group_id, message=MessageSegment.image(payload)

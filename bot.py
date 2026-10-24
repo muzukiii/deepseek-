@@ -127,6 +127,36 @@ async def _reconcile_legacy_memory() -> None:
         logger.warning(f"旧记忆迁移跳过（不影响启动）: {e}")
 
 
+@_driver.on_startup
+async def _prepare_sticker_library() -> None:
+    """启动时自检表情库：隔离非图片文件，并把策展表情补到本地镜像。
+
+    sanitize 只读几十个文件头，同步跑完没有代价；镜像下载放进后台任务，
+    绝不延迟 WebSocket 接线。两处失败都不影响启动——最坏情况就是这一轮
+    表情发不出去，文字回复照常。
+    """
+    try:
+        from astrabot.chat_service import sticker_store
+
+        report = sticker_store.sanitize()
+        if report["dropped"]:
+            logger.warning(
+                f"本地表情库清理：保留 {report['kept']} 条，移出 {report['dropped']} 个非图片文件"
+                f"（示例：{report['samples'][:2]}）"
+            )
+        else:
+            logger.debug(f"本地表情库自检通过：{report['kept']} 条")
+    except Exception as e:
+        logger.warning(f"表情库自检跳过（不影响启动）: {e}")
+
+    try:
+        from astrabot.chat_service.sticker_gallery import schedule_mirror
+
+        schedule_mirror()
+    except Exception as e:
+        logger.debug(f"表情镜像预取跳过: {e}")
+
+
 _patch_uvicorn_server()
 
 

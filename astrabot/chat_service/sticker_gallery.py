@@ -14,6 +14,11 @@ from pathlib import Path
 import httpx
 
 from astrabot.chat_service import sticker_store
+from astrabot.chat_service.image_utils import (
+    download_image_via_proxy,
+    image_extension,
+    is_image_bytes,
+)
 from astrabot.chat_service.text_tokenizer import term_list
 from astrabot.logmanager.logger import logger
 
@@ -28,6 +33,13 @@ _curated_cache: tuple[float, dict[str, str]] = (0.0, {})
 # 并落盘以便重启后不必冷取、断网时回退到上次成功结果。
 _DATA_DIR = Path(__file__).resolve().parent / "data"
 _CACHE_FILE = _DATA_DIR / "gallery_cache.json"
+# 策展图的本地镜像目录：发送时只读这里，不再把回复路径压在 GitHub 上。
+# 远程 url 指向 raw.githubusercontent.com（国内直连常被断），而表情是在文字
+# 回复已经发出之后才发的，抓取失败只会表现为"表情永远不出来"，很难归因。
+_IMAGE_DIR = _DATA_DIR / "gallery_images"
+_IMAGE_EXTS = (".jpg", ".png", ".gif", ".bmp", ".webp")
+_PREFETCH_CONCURRENCY = 6
+_MIRROR_COOLDOWN = 600.0  # 两次镜像补齐的最小间隔（秒）
 FRESH_TTL = 3600.0  # 内存视为新鲜的时长（秒）
 STALE_MAX_AGE = 7 * 86400.0  # 可回退提供陈旧数据的最大年龄（墙钟秒）
 
@@ -36,6 +48,8 @@ _fetched_wall: float = 0.0  # 上次成功抓取的墙钟时间
 _have_data = False  # 是否已成功抓到过（含空列表）
 _disk_loaded = False
 _refresh_task: asyncio.Task | None = None
+_prefetch_task: asyncio.Task | None = None
+_mirror_last_attempt: float = 0.0  # 上次触发镜像补齐的 monotonic 时刻
 
 
 def _remote_id(path: str) -> str:
@@ -187,10 +201,12 @@ async def list_stickers() -> list[dict]:
 
 
 async def resolve_sticker(sticker_id: str | int | None) -> str | Path | None:
-    """按 id 取图：本地库优先，未命中再查远程库。
+    """按 id 取图：本地优先，远程只兜底。
 
+    顺序 = 自建本地库 → 策展图本地镜像 → 远程 GitHub 地址。
     返回本地 Path 时，MessageSegment.image 会转成 file:// URI；
-    返回 str 时是远程 http(s) 地址。
+    返回 str 时是远程 http(s) 地址（调用方需自行下载，失败则只发文字）。
+    走到远程兜底时顺带触发一次后台补齐，下次同一张图就是本地命中。
     """
     if sticker_id is None or str(sticker_id).strip().lower() in {"", "null", "none"}:
         return None
@@ -201,10 +217,107 @@ async def resolve_sticker(sticker_id: str | int | None) -> str | Path | None:
         sticker_store.mark_used(wanted)
         return local
 
+    mirrored = local_image_path(wanted)
+    if mirrored is not None:
+        return mirrored
+
     for sticker in await list_stickers():
         if wanted == sticker["id"]:
+            schedule_mirror()  # 这次只能走远程，把账补上，下次不再联网
             return sticker["url"]
     return None
+
+
+def local_image_path(sticker_id: str | int | None) -> Path | None:
+    """本地镜像里有这张策展图就返回路径；纯磁盘检查，绝不联网。
+
+    id 只允许字母数字：目录里的文件名来自远程 index.json，卡死字符集就等于
+    堵死 "../../evil" 这类路径穿越。
+    """
+    if sticker_id is None:
+        return None
+    sid = str(sticker_id).strip()
+    if not sid or not sid.isalnum():
+        return None
+    for ext in _IMAGE_EXTS:
+        p = _IMAGE_DIR / f"{sid}{ext}"
+        if p.is_file():
+            return p
+    return None
+
+
+async def prefetch_local(stickers: list[dict] | None = None, *, force: bool = False) -> dict:
+    """把策展图库缺的图补进本地镜像：已有文件不动，失败只记日志。
+
+    只有启动预取和远程兜底命中时才会跑到这里，发送路径本身不等待下载。
+    写盘前必须过魔数校验：镜像目录一旦被非图片字节污染，机器人就会反复发送
+    被图床拒绝的垃圾（error_code=921），而且看不见失败原因。
+    """
+    if stickers is None:
+        stickers = await list_stickers()
+    missing = [
+        s
+        for s in stickers
+        if s.get("url") and (force or local_image_path(s.get("id")) is None)
+    ]
+    if not missing:
+        return {"total": len(stickers), "fetched": 0, "failed": 0}
+
+    sem = asyncio.Semaphore(_PREFETCH_CONCURRENCY)
+
+    async def _one(item: dict) -> bool:
+        raw = None
+        async with sem:
+            raw = await download_image_via_proxy(item["url"])
+        if not is_image_bytes(raw or b""):
+            return False
+        ext = image_extension(raw)
+        _IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+        dst = _IMAGE_DIR / f"{item['id']}{ext}"
+        tmp = dst.with_suffix(dst.suffix + ".tmp")
+        try:
+            tmp.write_bytes(raw)
+            tmp.replace(dst)
+            return True
+        except Exception as e:
+            logger.debug(f"Sticker mirror write failed for {item['id']}: {e}")
+            return False
+
+    results = await asyncio.gather(*(_one(s) for s in missing))
+    fetched = sum(1 for r in results if r)
+    failed = len(results) - fetched
+    logger.info(
+        f"本地表情镜像：补齐 {fetched}/{len(missing)} 张"
+        + (f"（失败 {failed}）" if failed else "")
+    )
+    return {"total": len(stickers), "fetched": fetched, "failed": failed}
+
+
+async def _mirror_safe() -> None:
+    try:
+        await prefetch_local()
+    except Exception as e:
+        logger.debug(f"Sticker mirror skipped: {e}")
+
+
+def schedule_mirror() -> None:
+    """后台补齐本地镜像：同进程去重 + 冷却，绝不阻塞调用方。
+
+    冷却是必需的：GitHub 不通时每发表情都会触发一次「30 个必败下载」，日志会被
+    ConnectError 刷屏还白打网络。启动那次调用落在冷却之外，照常立刻补。
+    """
+    global _prefetch_task, _mirror_last_attempt
+    if _prefetch_task is not None and not _prefetch_task.done():
+        return
+    now = time.monotonic()
+    if _mirror_last_attempt and now - _mirror_last_attempt < _MIRROR_COOLDOWN:
+        return
+    _mirror_last_attempt = now
+    try:
+        _prefetch_task = asyncio.create_task(_mirror_safe())
+    except RuntimeError:
+        # 没有运行中的事件循环：跳过，下次调用再试
+        pass
 
 
 # 兼容旧调用点

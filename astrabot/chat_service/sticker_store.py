@@ -15,15 +15,19 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import shutil
 import threading
 import time
 from pathlib import Path
 
+from astrabot.chat_service.image_utils import image_extension, is_image_bytes
 from astrabot.logmanager.logger import logger
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 STICKER_DIR = DATA_DIR / "stickers"
 INDEX_FILE = STICKER_DIR / "index.json"
+# 启动自检把不像图片的条目移到这里，不物理删除，方便回滚与排查。
+REJECTED_DIR = DATA_DIR / "stickers_rejected"
 
 # 单张图片上限，超过则不入库（避免把磁盘塞满）
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
@@ -110,6 +114,15 @@ def save_sticker(
         )
         return None
 
+    # 只收真图片：库里曾塞满 base64-decode(URL) 出来的百来字节垃圾，机器人照选
+    # 不误，发送时全被图床拒（error_code=921），本地优先反而让表情永远发不出去。
+    ext = image_extension(image_bytes)
+    if not ext:
+        logger.debug(
+            f"Sticker skipped: {len(image_bytes)} bytes is not a recognizable image"
+        )
+        return None
+
     description = (description or "").strip()
     if not description:
         # 没有描述就无法让模型按语境挑选，存了也用不上
@@ -139,7 +152,7 @@ def save_sticker(
                 index.pop(old_id, None)
 
         STICKER_DIR.mkdir(parents=True, exist_ok=True)
-        filename = f"{sid}.jpg"
+        filename = f"{sid}{ext}"
         try:
             (STICKER_DIR / filename).write_bytes(image_bytes)
         except Exception as e:
@@ -221,6 +234,54 @@ def stats() -> dict:
         "bytes": total_bytes,
         "used": sum(1 for it in items if it.get("uses", 0) > 0),
     }
+
+
+def sanitize(*, dry_run: bool = False) -> dict:
+    """启动自检：把不像图片、或文件已丢失的条目移出本地库，返回统计。
+
+    只在启动时跑一次（逐个读 16 字节文件头），避免每条消息都付这个代价。
+    不合格的文件移到 REJECTED_DIR 而不是删除，便于回滚和查因；同名冲突时
+    加时间戳，绝不覆盖已有证据。dry_run 只统计不改动。
+    """
+    with _lock:
+        index = _read_index_from_disk()
+        kept: dict = {}
+        dropped: list[str] = []
+        for sid, meta in index.items():
+            name = str(meta.get("file", ""))
+            path = STICKER_DIR / name
+            if not path.is_file():
+                dropped.append(f"{name} (missing)")
+                continue
+            try:
+                with path.open("rb") as f:
+                    head = f.read(16)
+            except Exception as e:
+                logger.debug(f"Sticker sanitize read failed for {name}: {e}")
+                dropped.append(f"{name} (unreadable)")
+                continue
+            if is_image_bytes(head):
+                kept[sid] = meta
+                continue
+            dropped.append(f"{name} ({len(head)}-byte header not an image)")
+            if not dry_run:
+                try:
+                    REJECTED_DIR.mkdir(parents=True, exist_ok=True)
+                    dst = REJECTED_DIR / name
+                    if dst.exists():
+                        dst = REJECTED_DIR / f"{int(time.time())}-{name}"
+                    shutil.move(str(path), str(dst))
+                except Exception as e:
+                    logger.warning(f"Sticker quarantine failed for {name}: {e}")
+
+        if not dry_run and dropped:
+            _save_index(kept)
+        return {
+            "kept": len(kept),
+            "dropped": len(dropped),
+            "samples": dropped[:5],
+            "dry_run": dry_run,
+        }
 
 
 def image_b64_to_bytes(b64: str) -> bytes | None:

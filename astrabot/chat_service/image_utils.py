@@ -40,6 +40,37 @@ def detect_mime(raw: bytes) -> str:
     return "image/jpeg"
 
 
+def is_image_bytes(raw: bytes) -> bool:
+    """按文件头判断是否真的是图片；认不出格式一律 False。
+
+    入库和发送前都要过这一道：曾有调用点把图片 URL 当 base64 解码后落盘，
+    产出 165~171 字节的确定性垃圾，机器人每次都挑中它们，发送时被 QQ 图床
+    以 error_code=921 拒绝——文字回复照旧送达，表情包却永远发不出去。
+    """
+    if not raw or len(raw) < 12:
+        return False
+    for sig, _ in _MAGIC:
+        if raw.startswith(sig):
+            return True
+    return raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"
+
+
+_EXT_BY_MIME = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+    "image/webp": ".webp",
+}
+
+
+def image_extension(raw: bytes) -> str:
+    """按真实格式给出扩展名；不是图片时返回空串，调用方据此拒收。"""
+    if not is_image_bytes(raw):
+        return ""
+    return _EXT_BY_MIME.get(detect_mime(raw), ".jpg")
+
+
 def to_data_uri(raw: bytes) -> str:
     """把图片字节转成带正确 MIME 的 data URI。"""
     mime = detect_mime(raw)
