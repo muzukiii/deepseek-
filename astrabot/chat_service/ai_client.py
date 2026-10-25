@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import json
 
-import anthropic
 import httpx
 from openai import AsyncOpenAI
 
@@ -31,7 +30,20 @@ def _create_openai_client(base_url: str, api_key: str, http_client: httpx.AsyncC
     return AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
 
 
-def _create_anthropic_client(base_url: str, api_key: str, http_client: httpx.AsyncClient) -> anthropic.AsyncAnthropic:
+def _create_anthropic_client(base_url: str, api_key: str, http_client: httpx.AsyncClient):
+    """惰性导入 anthropic：它顶层依赖原生库 jiter，被 Windows 智能应用控制拦过一次。
+
+    聊天三档都走 OPENAI 协议时，不该因为一个用不上的 SDK 让整个插件导入失败、
+    bot 起不来；真要用 ANTHROPIC 档却导不进来，就抛能照做的错误，不静默退化。
+    """
+    try:
+        import anthropic
+    except Exception as e:
+        raise RuntimeError(
+            "ANTHROPIC protocol unavailable: `anthropic` failed to import "
+            f"({e}). 若提示『应用程序控制策略已阻止此文件』，是被 Smart App Control 拦了 "
+            "它依赖的 jiter 原生库——换一个 jiter 版本或关闭智能应用控制即可。"
+        ) from e
     return anthropic.AsyncAnthropic(base_url=base_url, api_key=api_key, http_client=http_client)
 
 
@@ -196,22 +208,57 @@ def _needs_high_detail(b64: str) -> bool:
     return False
 
 
+def _vision_chain(config) -> list[tuple[str, str, str, str, str]]:
+    """识图档位：主视觉 → 辅助视觉，返回 (protocol, base_url, api_key, model, reasoning_effort)。
+
+    与聊天用的 _provider_chain 刻意分开：能不能识图取决于模型是否多模态，跟聊天档位的
+    主/备/三顺序无关，共用一条链会把识图悄悄钉到一个不支持图片的模型上。
+    """
+    tiers: list[tuple[str, str, str, str, str]] = []
+
+    def add(base_url: str, api_key: str, model: str, effort: str) -> None:
+        key = api_key or config.API_KEY
+        # 同端点同模型只留一档：未配辅助档时不能把主聊天 API 再打一遍
+        if base_url and key and model and (base_url, key, model) not in [t[1:4] for t in tiers]:
+            tiers.append(("OPENAI", base_url, key, model, effort))
+
+    provider = (config.VISUAL_API_PROVIDER or "").strip().upper()
+    if provider not in ("", "MAIN", "DEEPSEEK") and config.VISUAL_API_KEY:
+        # 独立视觉服务只认它自带的 Key（旧行为）
+        add(API_BASE_URLS.get(provider, API_BASE_URLS["SILICONFLOW"]), config.VISUAL_API_KEY,
+            config.VISUAL_API_MODEL, config.vision_reasoning_effort)
+    else:
+        # 默认复用主聊天 API；单独配置 VISUAL_API_* 时优先，以便识图钉在多模态端点
+        add(config.VISUAL_API_BASE_URL or config.API_BASE_URL, config.VISUAL_API_KEY,
+            config.VISUAL_API_MODEL or config.API_MODEL, config.vision_reasoning_effort)
+
+    # 辅助档必须显式给出端点和模型，否则会顺着聊天档位漂到不支持图片的模型上
+    add(config.VISUAL_BACK_API_BASE_URL, config.VISUAL_BACK_API_KEY,
+        config.VISUAL_BACK_API_MODEL, config.vision_back_reasoning_effort)
+    return tiers
+
+
 async def analyze_images(
     images_base64: list[str],
     prompt: str,
     force_detail: str | None = None,
 ) -> dict:
-    """识图：默认复用主 API（DeepSeek 多模态），也可切到独立视觉服务。
+    """识图：按 主视觉档 → 辅助视觉档 依次尝试，失败返回空 dict。
 
-    DeepSeek 的图片按 token 计费且有硬上限（每张 ≤1024 token），
-    因此识图成本极低，无需单独申请视觉 API Key。
+    每档只试一次：识图是在回复链路上同步等待的，同一档重试只会把人晾在更长的超时里，
+    不如直接换下一档（限流/超时/返回非 JSON 都算这一档失败）。思维链按档透传，
+    所以主力换成智谱 glm 后不会每次识图都白烧 reasoning token。
 
     detail 默认沿用配置，但会按图片特征自动升级：截图、含文字、
     尺寸偏小或长宽比异常的图用 high，能显著提升 OCR 与细节准确度，
     普通表情包仍用 low 以省 token。
     """
     config = get_config()
-    provider = (config.VISUAL_API_PROVIDER or "").strip().upper()
+
+    tiers = _vision_chain(config)
+    if not tiers:
+        logger.info("Image analysis skipped: no usable vision API configured")
+        return {}
 
     # 按图片内容决定精度：配置为 auto 时启用自动判断
     detail = config.vision_detail
@@ -219,23 +266,6 @@ async def analyze_images(
         detail = force_detail
     elif detail == "auto":
         detail = "high" if any(_needs_high_detail(b) for b in images_base64) else "low"
-
-    # 解析使用哪个服务：主 API 还是独立视觉 API
-    use_main_api = provider in ("", "MAIN", "DEEPSEEK") or not config.VISUAL_API_KEY
-    if use_main_api:
-        # 识图默认复用主 API；若配置了独立的 VISUAL_API_BASE_URL 则优先用它，
-        # 以便主 API 被切成不适合识图的模型时，识图仍能固定走多模态端点。
-        base_url = config.VISUAL_API_BASE_URL or config.API_BASE_URL
-        api_key = config.VISUAL_API_KEY or config.API_KEY
-        model = config.VISUAL_API_MODEL or config.API_MODEL
-    else:
-        base_url = API_BASE_URLS.get(provider, API_BASE_URLS["SILICONFLOW"])
-        api_key = config.VISUAL_API_KEY
-        model = config.VISUAL_API_MODEL
-
-    if not api_key or not model:
-        logger.info("Image analysis skipped: no usable vision API configured")
-        return {}
 
     # 单次请求的图片数量上限，避免群内刷图时一次性把成本放大
     max_images = max(1, config.vision_max_images)
@@ -245,9 +275,6 @@ async def analyze_images(
             f"only analyzing the first {max_images}"
         )
         images_base64 = images_base64[:max_images]
-
-    http_client = _get_httpx_client()
-    client = AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
 
     content_parts = [{"type": "text", "text": prompt}]
     for b64 in images_base64:
@@ -268,28 +295,32 @@ async def analyze_images(
 
     messages = [{"role": "user", "content": content_parts}]
 
-    try:
-        response = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            response_format={"type": "json_object"},
-            timeout=60,
-        )
-        content = response.choices[0].message.content or "{}"
-        result = json.loads(_clean_json(content))
-        usage = getattr(response, "usage", None)
-        usage_tracker.record(
-            kind="vision",
-            model=model,
-            usage=usage.model_dump() if usage is not None else None,
-        )
-        return result
-    except json.JSONDecodeError as e:
-        logger.error(f"Image analysis returned non-JSON: {e}")
-        return {}
-    except Exception as e:
-        logger.error(f"Image analysis failed: {e}")
-        return {}
+    for protocol, base_url, api_key, model, effort in tiers:
+        try:
+            result = await chat(
+                protocol=protocol,
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                messages=messages,
+                response_format="json_object",
+                reasoning_effort=effort or None,
+                timeout=60,
+                usage_kind="vision",
+            )
+        except Exception as e:
+            logger.warning(f"Image analysis failed on {model}: {e}")
+            continue
+
+        content = (result.get("content") or "").strip()
+        if not content:
+            logger.warning(f"Empty vision response from {model}, trying next tier")
+            continue
+        try:
+            return json.loads(_clean_json(content))
+        except json.JSONDecodeError as e:
+            logger.warning(f"Non-JSON vision response from {model}, trying next tier: {e}")
+    return {}
 
 
 def _clean_json(raw: str) -> str:

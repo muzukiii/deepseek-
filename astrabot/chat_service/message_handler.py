@@ -85,6 +85,14 @@ def _prune_ttl_cache(cache: dict, now: float, cap: int) -> None:
             cache.pop(k, None)
 
 
+def _streak_exempt(config, user_id) -> bool:
+    """连回上限是否对该 QQ 放行。
+
+    防互刷要挡的是陌生账号；白名单里的人（通常是主人自己）长聊不该被 3 轮封顶掐断。
+    """
+    return str(user_id) in config.streak_allowed_users
+
+
 async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     """群消息入口：解析消息段 → 存历史 → 判断是否需要回复 → 进入回复流程"""
     config = get_config()
@@ -273,7 +281,8 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     # 恢复方式有两种，任一满足即可：
     #   1) 别人插话 —— 换人即归零
     #   2) 冷却期满 —— 默认 5 分钟，避免没人说话时永久卡住
-    if config.max_reply_streak > 0:
+    # 白名单内的 QQ 跳过这一节，既不看上限也不进冷却。
+    if config.max_reply_streak > 0 and not _streak_exempt(config, user_id):
         streak = ReplyController.peek_streak(group_id, user_id)
         if streak >= config.max_reply_streak:
             cooldown = config.reply_streak_cooldown
@@ -311,7 +320,7 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     ReplyController.set_replying(group_id, True)
     # 累加连续互回次数：换了人会自动归零
     streak = ReplyController.bump_streak(group_id, user_id)
-    if config.max_reply_streak > 0:
+    if config.max_reply_streak > 0 and not _streak_exempt(config, user_id):
         if streak >= config.max_reply_streak:
             # 刚到上限，启动冷却计时；期满即恢复
             ReplyController.set_blocked(group_id)

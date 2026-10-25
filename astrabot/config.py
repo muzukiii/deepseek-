@@ -103,6 +103,9 @@ class Config:
     max_reply_streak: int = 3
     # 达到上限后的冷却秒数，期满自动恢复（0 = 只靠别人插话恢复）
     reply_streak_cooldown: int = 300
+    # 连回上限的白名单：名单内的 QQ 不受 max_reply_streak 与冷却约束。
+    # 防互刷要挡的是陌生账号，不是正在长聊的自己人；留空 = 无人豁免（旧行为）。
+    streak_allowed_users: set[str] = field(default_factory=set)
 
     # 单次回复的 max_tokens 硬顶。它是上限不是目标，留足余量以免 JSON 被截断。
     chat_max_tokens: int = 2048
@@ -117,6 +120,11 @@ class Config:
     reasoning_effort: str = "low"
     back_reasoning_effort: str = "low"
     third_reasoning_effort: str = ""
+    # 识图：默认不传该参数（= 与改造前完全一致）。只有把识图主力换成智谱 glm 时才填
+    # low——它服务端默认就思考，每次识图都会白烧思维链；反过来 deepseek-chat 一旦
+    # 收到 reasoning_effort 反而会开始思考，所以辅助档默认留空。
+    vision_reasoning_effort: str = ""
+    vision_back_reasoning_effort: str = ""
 
     # 前情滚动摘要：把超出最近窗口（history_messages）的旧消息压成一条摘要常驻上下文，
     # 使"能回溯多久"与"prompt 有多大"解绑——摘要总长封顶，可回溯历史却不受模型窗口限制。
@@ -181,6 +189,11 @@ class Config:
     VISUAL_API_KEY: str = ""
     VISUAL_API_PROVIDER: str = "SILICONFLOW"
     VISUAL_API_MODEL: str = ""
+    # 识图辅助档：主视觉档失败（限流、超时、返回非 JSON）时才试它。
+    # 留空则不参与，识图只用主视觉档（= 旧行为）。
+    VISUAL_BACK_API_BASE_URL: str = ""
+    VISUAL_BACK_API_KEY: str = ""
+    VISUAL_BACK_API_MODEL: str = ""
 
     system_prompt: str = ""
 
@@ -287,31 +300,34 @@ class Config:
             val = str(raw.get(key, default)).strip().lower()
             return val if val in ("", "low", "high", "max") else default
 
+        def _user_set_env(key: str) -> set[str]:
+            """QQ 号集合：支持 [123,456] 与 123,456 两种写法；写坏时退回逗号切分。"""
+            val = raw.get(key, "")
+            if not val:
+                return set()
+            try:
+                parsed = (
+                    ast.literal_eval(val)
+                    if isinstance(val, str) and val.strip().startswith("[")
+                    else str(val).split(",")
+                )
+            except (ValueError, SyntaxError):
+                parsed = str(val).split(",")
+            if isinstance(parsed, (list, tuple, set)):
+                return {str(x).strip() for x in parsed if str(x).strip()}
+            return {str(parsed).strip()}
+
         reasoning_effort = _effort_env("reasoning_effort", "low")
         back_reasoning_effort = _effort_env("back_reasoning_effort", "low")
         third_reasoning_effort = _effort_env("third_reasoning_effort", "")
+        vision_reasoning_effort = _effort_env("vision_reasoning_effort", "")
+        vision_back_reasoning_effort = _effort_env("vision_back_reasoning_effort", "")
 
         poke_reply = _bool_env("poke_reply", True)
         poke_back = _bool_env("poke_back", True)
 
-        # 命令白名单：支持 command_allowed_users=[123,456] 或 123,456
-        allowed_raw = raw.get("command_allowed_users", "")
-        allowed_users: set[str] = set()
-        if allowed_raw:
-            try:
-                parsed = (
-                    ast.literal_eval(allowed_raw)
-                    if isinstance(allowed_raw, str) and allowed_raw.strip().startswith("[")
-                    else str(allowed_raw).split(",")
-                )
-                if isinstance(parsed, (list, tuple, set)):
-                    allowed_users = {str(x).strip() for x in parsed if str(x).strip()}
-                else:
-                    allowed_users = {str(parsed).strip()}
-            except (ValueError, SyntaxError):
-                allowed_users = {
-                    x.strip() for x in str(allowed_raw).split(",") if x.strip()
-                }
+        # 命令白名单：只有名单内的 QQ 能用斜杠命令；留空 = 不限制（删除类命令仍 fail-safe 拒绝）
+        allowed_users = _user_set_env("command_allowed_users")
 
         sticker_enabled = _bool_env("sticker_enabled", True)
         sticker_autosave = _bool_env("sticker_autosave", True)
@@ -340,26 +356,9 @@ class Config:
         summary_max_chars = _int_env("summary_max_chars", 600, 100, 4000)
         summary_max_tokens = _int_env("summary_max_tokens", 512, 64, 2048)
 
-        # 忽略名单：支持 ignore_users=[123,456] 或 123,456
-        ignore_raw = raw.get("ignore_users", "")
-        ignore_users: set[str] = set()
-        if ignore_raw:
-            try:
-                parsed_ignore = (
-                    ast.literal_eval(ignore_raw)
-                    if isinstance(ignore_raw, str) and ignore_raw.strip().startswith("[")
-                    else str(ignore_raw).split(",")
-                )
-                if isinstance(parsed_ignore, (list, tuple, set)):
-                    ignore_users = {
-                        str(x).strip() for x in parsed_ignore if str(x).strip()
-                    }
-                else:
-                    ignore_users = {str(parsed_ignore).strip()}
-            except (ValueError, SyntaxError):
-                ignore_users = {
-                    x.strip() for x in str(ignore_raw).split(",") if x.strip()
-                }
+        # 忽略名单与连回豁免名单
+        ignore_users = _user_set_env("ignore_users")
+        streak_allowed_users = _user_set_env("streak_allowed_users")
 
         return cls(
             name=raw["name"],
@@ -371,6 +370,7 @@ class Config:
             ignore_users=ignore_users,
             max_reply_streak=max_reply_streak,
             reply_streak_cooldown=reply_streak_cooldown,
+            streak_allowed_users=streak_allowed_users,
             chat_max_tokens=chat_max_tokens,
             reasoning_effort=reasoning_effort,
             back_reasoning_effort=back_reasoning_effort,
@@ -404,6 +404,8 @@ class Config:
             vision_provider=vision_provider,
             vision_detail=vision_detail,
             vision_max_images=vision_max_images,
+            vision_reasoning_effort=vision_reasoning_effort,
+            vision_back_reasoning_effort=vision_back_reasoning_effort,
             output_style=raw["output_style"],
             reply_style=raw["reply_style"],
             extra_style=raw["extra_style"],
@@ -428,6 +430,9 @@ class Config:
             VISUAL_API_KEY=raw.get("VISUAL_API_KEY", ""),
             VISUAL_API_PROVIDER=raw.get("VISUAL_API_PROVIDER", "SILICONFLOW"),
             VISUAL_API_MODEL=raw.get("VISUAL_API_MODEL", ""),
+            VISUAL_BACK_API_BASE_URL=raw.get("VISUAL_BACK_API_BASE_URL", ""),
+            VISUAL_BACK_API_KEY=raw.get("VISUAL_BACK_API_KEY", ""),
+            VISUAL_BACK_API_MODEL=raw.get("VISUAL_BACK_API_MODEL", ""),
             system_prompt=raw.get("system_prompt", ""),
         )
 

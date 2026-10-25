@@ -50,7 +50,8 @@ AstraBot/
 - API Key：
   - **主聊天模型** — 通过 `API_KEY` 配置，同时用于联网搜索 Agent
     （智谱端点还顺带提供 `web_search` 联网搜索结果，无需额外密钥）
-  - **视觉模型** — 通过 `VISUAL_API_KEY` 配置，用于图像识别
+  - **视觉模型** — 识图按 `VISUAL_API_*` → `VISUAL_BACK_API_*` 两档依次尝试（前者主力、后者辅助），
+    用于图像识别；主力档留空则回退主聊天模型，Key 留空则复用对应档位的聊天 Key
 
 ### 安装
 
@@ -109,7 +110,8 @@ cp .env.example .env
 | `reply_rate_at` | 被 @ 时的回复概率 |
 | `API_PROTOCOL` / `API_BASE_URL` / `API_KEY` / `API_MODEL` | 主聊天模型配置，同时用于联网搜索 Agent |
 | `BACK_API_PROTOCOL` / `BACK_API_BASE_URL` / `BACK_API_KEY` / `BACK_API_MODEL` | 主 API 失败时的备用聊天模型配置 |
-| `VISUAL_API_KEY` / `VISUAL_API_PROVIDER` / `VISUAL_API_MODEL` | 图片分析专用配置 |
+| `VISUAL_API_KEY` / `VISUAL_API_PROVIDER` / `VISUAL_API_MODEL` | 识图主力端点（多模态模型） |
+| `VISUAL_BACK_API_BASE_URL` / `VISUAL_BACK_API_KEY` / `VISUAL_BACK_API_MODEL` | 识图辅助端点：主力档限流/超时/返回非 JSON 时改试它，每档只试一次；三项留空则不参与 |
 | `command_allowed_users` | 群内指令白名单 QQ 号，写 `123456,789012` 或 `[123456,789012]`；留空时删除/清空记忆与切换人设一律拒绝（见下面的「群内指令」） |
 
 ### 启动
