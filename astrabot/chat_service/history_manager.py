@@ -252,15 +252,67 @@ async def get_compressible(group_id: int, after_id: int, before_id: int, limit: 
     return [_row_to_dict(r) for r in cur.fetchall()]
 
 
-async def select_context(group_id: int, max_messages: int = 15, exclude_message_id: int | None = None) -> list[dict]:
+FOCUS_SPEAKER_EXTRA = 6   # 说话人整窗没发言时，补他最近几条旧消息
+FOCUS_QUOTE_EXTRA = 2     # 被引用那条消息前后各补几条
+FOCUS_MAX_ROWS = 10       # 额外注入的硬上限，防止一次@把上下文撑爆
+FOCUS_TEXT_CHARS = 20     # 文本兜底：用引用正文前多少字去匹配
+FOCUS_TEXT_SCAN = 200     # 文本兜底只在该群最近多少条里找
+FOCUS_EXTRA_RATIO = 0.6   # 补充字符数不得超过基础上下文的这个比例
+FOCUS_EXTRA_FLOOR = 600   # 基础上下文很短时（闲聊），也给一点补充额度
+
+
+def _ctx_chars(rows) -> int:
+    return sum(len(r["message"] or "") for r in rows)
+
+
+async def select_context(
+    group_id: int,
+    max_messages: int = 15,
+    exclude_message_id: int | None = None,
+    focus_user_id: str | None = None,
+    focus_message_id: int | None = None,
+    focus_text: str | None = None,
+    focus_author_id: str | None = None,
+) -> list[dict]:
+    """只要消息的兼容入口；需要触发统计请用 select_context_with_stats。"""
+    rows, _ = await select_context_with_stats(
+        group_id,
+        max_messages=max_messages,
+        exclude_message_id=exclude_message_id,
+        focus_user_id=focus_user_id,
+        focus_message_id=focus_message_id,
+        focus_text=focus_text,
+        focus_author_id=focus_author_id,
+    )
+    return rows
+
+
+async def select_context_with_stats(
+    group_id: int,
+    max_messages: int = 15,
+    exclude_message_id: int | None = None,
+    focus_user_id: str | None = None,
+    focus_message_id: int | None = None,
+    focus_text: str | None = None,
+    focus_author_id: str | None = None,
+) -> tuple[list[dict], dict]:
     """
-    选取进入 prompt 的上下文消息。
+    选取进入 prompt 的上下文消息，并返回本次选取的统计。
 
     规则：
     - msg_type='mid_term_memory' 的消息始终保留（pinned）
     - 普通消息（user/bot）从新到旧取，最多 max_messages 条
     - bot 消息不计入 max_messages 限制
     - 按时间排序返回
+
+    相关性补充（不扩大窗口，只补窗口外的必要前情）：
+    - 引用锚点：被引用那条及其前后各 FOCUS_QUOTE_EXTRA 条。优先按
+      message_id 定位；ID 不在库里时，退回"引用作者 + 正文前 FOCUS_TEXT_CHARS 字"
+      在该群最近 FOCUS_TEXT_SCAN 条里匹配（别人家的/入群前的消息也能接上）
+    - 回场说话人：focus_user_id 在整个窗口里都没出现时，补他最近
+      FOCUS_SPEAKER_EXTRA 条；窗口内有发言则不补
+    - 护栏：补充部分字符数不得超过基础上下文的 FOCUS_EXTRA_RATIO；
+      超了先丢说话人补量，再超就只留锚点本身；行数另有 FOCUS_MAX_ROWS 硬上限
     """
     conn = _get_db()
     conn.row_factory = sqlite3.Row
@@ -289,10 +341,107 @@ async def select_context(group_id: int, max_messages: int = 15, exclude_message_
                 break
 
     combined = list(pinned) + list(reversed(selected))
+    base_ids = {r["id"] for r in combined}
+
+    # --- 引用锚点 ---
+    anchor = None
+    quote_state = "none"
+    if focus_message_id:
+        anchor = conn.execute(
+            """SELECT time, id FROM messages
+               WHERE group_id = ? AND message_id = ? AND msg_type IN ('user', 'bot')
+               ORDER BY id DESC LIMIT 1""",
+            (group_id, focus_message_id),
+        ).fetchone()
+        quote_state = "hit_id" if anchor is not None else "miss"
+
+    if anchor is None and focus_text and focus_author_id:
+        prefix = focus_text.strip()[:FOCUS_TEXT_CHARS]
+        if prefix:
+            anchor = conn.execute(
+                """SELECT time, id FROM (
+                       SELECT * FROM messages WHERE group_id = ? AND msg_type = 'user'
+                       ORDER BY time DESC, id DESC LIMIT ?
+                   ) WHERE user_id = ? AND message LIKE ?
+                   ORDER BY time DESC, id DESC LIMIT 1""",
+                (group_id, FOCUS_TEXT_SCAN, focus_author_id, f"%{prefix}%"),
+            ).fetchone()
+            if anchor is not None:
+                quote_state = "hit_text"
+
+    quote_rows: list[sqlite3.Row] = []
+    if anchor is not None:
+        before = conn.execute(
+            """SELECT * FROM messages WHERE group_id = ? AND msg_type IN ('user', 'bot')
+               AND (time < ? OR (time = ? AND id <= ?))
+               ORDER BY time DESC, id DESC LIMIT ?""",
+            (group_id, anchor["time"], anchor["time"], anchor["id"], FOCUS_QUOTE_EXTRA + 1),
+        ).fetchall()
+        after = conn.execute(
+            """SELECT * FROM messages WHERE group_id = ? AND msg_type IN ('user', 'bot')
+               AND (time > ? OR (time = ? AND id > ?))
+               ORDER BY time ASC, id ASC LIMIT ?""",
+            (group_id, anchor["time"], anchor["time"], anchor["id"], FOCUS_QUOTE_EXTRA),
+        ).fetchall()
+        quote_rows.extend(reversed(before))
+        quote_rows.extend(after)
+
+    # --- 回场说话人 ---
+    speaker_rows: list[sqlite3.Row] = []
+    if focus_user_id:
+        latest = conn.execute(
+            """SELECT id FROM messages WHERE group_id = ? AND msg_type = 'user' AND user_id = ?
+               ORDER BY time DESC, id DESC LIMIT 1""",
+            (group_id, focus_user_id),
+        ).fetchone()
+        if latest is not None and latest["id"] not in base_ids:
+            rows = conn.execute(
+                """SELECT * FROM messages WHERE group_id = ? AND msg_type = 'user' AND user_id = ?
+                   ORDER BY time DESC, id DESC LIMIT ?""",
+                (group_id, focus_user_id, FOCUS_SPEAKER_EXTRA),
+            ).fetchall()
+            speaker_rows.extend(reversed(rows))
+
+    # --- 护栏：字符预算 ---
+    base_chars = _ctx_chars(combined)
+    budget = max(FOCUS_EXTRA_FLOOR, int(base_chars * FOCUS_EXTRA_RATIO))
+    trimmed = False
+    if _ctx_chars(quote_rows) + _ctx_chars(speaker_rows) > budget:
+        speaker_rows = []
+        trimmed = True
+    if quote_rows and _ctx_chars(quote_rows) > budget:
+        keep_id = anchor["id"] if anchor is not None else None
+        quote_rows = [r for r in quote_rows if r["id"] == keep_id] or quote_rows[:1]
+        trimmed = True
+
+    # --- 合并去重 ---
+    added: list[sqlite3.Row] = []
+    added_ids = set(base_ids)
+    for r in list(quote_rows) + list(speaker_rows):
+        if r["id"] in added_ids:
+            continue
+        added.append(r)
+        added_ids.add(r["id"])
+    if len(added) > FOCUS_MAX_ROWS:
+        added = added[-FOCUS_MAX_ROWS:]
+
+    combined = combined + added
     if exclude_message_id is not None:
         combined = [r for r in combined if r["message_id"] != exclude_message_id]
     combined.sort(key=lambda r: (r["time"], r["id"]))
-    return [_row_to_dict(r) for r in combined]
+
+    stats = {
+        "base_rows": len(selected) + len(pinned),
+        "extra_rows": len(added),
+        "extra_quote": len([r for r in added if r["id"] in {x["id"] for x in quote_rows}]),
+        "extra_speaker": len([r for r in added if r["id"] in {x["id"] for x in speaker_rows}]),
+        "quote_state": quote_state,
+        "trimmed": trimmed,
+        "base_chars": base_chars,
+        "extra_chars": _ctx_chars(added),
+        "ctx_chars": _ctx_chars(combined),
+    }
+    return [_row_to_dict(r) for r in combined], stats
 
 
 

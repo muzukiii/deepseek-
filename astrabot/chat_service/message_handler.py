@@ -17,7 +17,7 @@ from astrabot.chat_service.history_manager import (
     append_message,
     get_history_since,
     get_recent_messages,
-    select_context,
+    select_context_with_stats,
     trim_history,
     set_image_descriptions,
 )
@@ -124,6 +124,8 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
                 "user_id": str(sender.user_id),
                 "user_name": sender.card or sender.nickname or "",
                 "message": plain[:100],
+                # 带上原始 message_id：取上下文时用它把被引用那条的前后文捞进来
+                "message_id": int(getattr(reply_obj, "message_id", 0) or 0),
             }
             segments.append(reply_seg)
             logger.debug(f"Reply segment resolved via event.reply: {reply_seg}")
@@ -146,6 +148,7 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
                     "user_id": str(sender.get("user_id", "")),
                     "user_name": sender.get("card") or sender.get("nickname", ""),
                     "message": plain[:100],
+                    "message_id": int(seg.data.get("id") or 0),
                 }
                 segments.append(reply_seg)
                 logger.debug(f"Reply segment resolved via get_msg: {reply_seg}")
@@ -168,9 +171,13 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
                             "user_id": row["user_id"],
                             "user_name": row["user_name"],
                             "message": row["message"][:100],
+                            "message_id": reply_id,
                         })
                     else:
-                        segments.append({"type": "reply", "user_id": "", "user_name": "", "message": f"消息{reply_id}"})
+                        segments.append({
+                            "type": "reply", "user_id": "", "user_name": "",
+                            "message": f"消息{reply_id}", "message_id": reply_id,
+                        })
                 except Exception:
                     segments.append({"type": "reply", "user_id": "", "user_name": "", "message": f"消息{reply_id}"})
         elif seg.type == "text":
@@ -493,11 +500,26 @@ async def _reply_flow(
 
     plugin_since = int(time.time())  # 记录插件执行前的时间戳，后续用于获取执行期间的新消息
 
-    history = await select_context(
+    # 引用回复时把被引用那条的 ID/作者/正文带下去：
+    # ID 命中就按 ID 取前后文；ID 不在库里（入群前、别的机器人发的）则按正文兜底匹配
+    focus_seg = next((seg for seg in current_segments if seg.get("type") == "reply"), {}) or {}
+    history, ctx_stats = await select_context_with_stats(
         group_id,
         max_messages=config.history_messages,
         exclude_message_id=event.message_id,
+        focus_user_id=str(user_id),
+        focus_message_id=int(focus_seg.get("message_id") or 0) or None,
+        focus_text=focus_seg.get("message") or None,
+        focus_author_id=str(focus_seg.get("user_id") or "") or None,
     )
+    ctx_line = (
+        f"[ctx] g={group_id} base={ctx_stats['base_rows']} extra={ctx_stats['extra_rows']}"
+        f"(quote={ctx_stats['extra_quote']},speaker={ctx_stats['extra_speaker']})"
+        f" quote={ctx_stats['quote_state']} chars={ctx_stats['ctx_chars']}"
+        + (" trimmed" if ctx_stats["trimmed"] else "")
+    )
+    # 每次取上下文只落一行：有补充用 INFO，其余用 DEBUG（避免同一行被计两次）
+    (logger.info if ctx_stats["extra_rows"] else logger.debug)(ctx_line)
     reply_context = await _extract_reply_context(bot, group_id, event, config)
 
     current_image_descs: list[str] = []

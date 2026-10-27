@@ -65,6 +65,7 @@ async def handle_private_message(bot: Bot, event: PrivateMessageEvent):
         conversation_id,
         max_messages=config.history_messages,
         exclude_message_id=event.message_id,
+        focus_user_id=str(user_id),
     )
     schedule_summarize(conversation_id, config.history_messages, config)
 
