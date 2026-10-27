@@ -1,79 +1,88 @@
 @echo off
-chcp 65001 >nul
-title AstraBot Launcher
 setlocal enabledelayedexpansion
+title AstraBot 控制台
+cd /d "%~dp0"
+set "CTL=%~dp0tools\launcher\astrabot_ctl.ps1"
+set "PS=powershell -NoProfile -ExecutionPolicy Bypass -File"
+set "CLI="
 
-set "BOT_DIR=%~dp0"
-set "SL_DIR=C:\Users\li204\Documents\git\tools\SnowLuma"
+if /i "%~1"=="all" set "CLI=1" & goto :do_all
+if /i "%~1"=="panel" set "CLI=1" & goto :do_panel
+if /i "%~1"=="open" set "CLI=1" & goto :do_open
+if /i "%~1"=="status" set "CLI=1" & goto :do_status
+if /i "%~1"=="stop" set "CLI=1" & goto :do_stop
+if /i "%~1"=="stopall" set "CLI=1" & goto :do_stopall
 
+:menu
+cls
+call :banner
+echo   1  启动全部   桥接检查 + 启动 Bot + 启动面板并打开
+echo   2  只启动面板 不启动 Bot
+echo   3  打开面板
+echo   4  查看状态
+echo   5  停止 Bot 与面板   桥接保持在线
+echo   6  停止全部   含 SnowLuma 桥接
+echo   0  退出
+echo.
+set "SEL="
+set /p "SEL=请选择 [0-6]: "
+if not defined SEL goto :menu
+if "%SEL%"=="1" goto :do_all
+if "%SEL%"=="2" goto :do_panel
+if "%SEL%"=="3" goto :do_open
+if "%SEL%"=="4" goto :do_status
+if "%SEL%"=="5" goto :do_stop
+if "%SEL%"=="6" goto :do_stopall
+if "%SEL%"=="0" exit /b 0
+echo.
+echo 无效选择：%SEL%
+ping -n 2 127.0.0.1 >nul
+goto :menu
+
+:banner
 echo ============================================
-echo   AstraBot one-click launcher
-echo ============================================
-echo.
-
-REM --- ?????????????????? (Errno 10048) ---
-set "RUNPID="
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":8080" ^| findstr "LISTENING"') do set "RUNPID=%%a"
-
-if defined RUNPID (
-    echo [INFO] AstraBot is already running ^(PID !RUNPID!^) on port 8080.
-    echo        Nothing to do. Run stop-all.bat first if you want to restart.
-    echo.
-    pause
-    exit /b 0
-)
-
-echo [1/3] Checking SnowLuma (WebUI 5099 / OneBot 3001)...
-netstat -ano | findstr ":5099" | findstr "LISTENING" >nul
-if errorlevel 1 (
-    if exist "%SL_DIR%\node.exe" (
-        echo       Not running. Starting SnowLuma...
-        start "SnowLuma" /D "%SL_DIR%" "%SL_DIR%\node.exe" "%SL_DIR%\index.mjs"
-        echo       Waiting for SnowLuma to initialize...
-        ping -n 13 127.0.0.1 >nul
-    ) else (
-        echo       [ERROR] SnowLuma not found at %SL_DIR%
-        pause
-        exit /b 1
-    )
-) else (
-    echo       [OK] SnowLuma already running
-)
-
-echo.
-echo [2/3] Waiting for OneBot WebSocket on 3001...
-set /a tries=0
-:waitloop
-netstat -ano | findstr ":3001" | findstr "LISTENING" >nul
-if not errorlevel 1 goto portready
-set /a tries+=1
-if !tries! GEQ 25 goto porttimeout
-ping -n 3 127.0.0.1 >nul
-goto waitloop
-
-:portready
-echo       [OK] OneBot 3001 is ready
-goto launch
-
-:porttimeout
-echo       [WARN] Timed out waiting for 3001
-echo       Make sure QQ is logged in and SnowLuma injection succeeded
-echo       AstraBot will keep retrying anyway
-
-:launch
-echo.
-echo [3/3] Starting AstraBot on port 8080...
-echo.
-echo ============================================
-echo   Ready. Press Ctrl+C to stop AstraBot.
-echo   SnowLuma runs in its own window.
+echo   AstraBot 控制台
 echo ============================================
 echo.
+exit /b 0
 
-cd /d "%BOT_DIR%"
-".venv-win\Scripts\python.exe" bot.py
+:do_all
+call :banner
+%PS% "%CTL%" -Action start-all
+goto :done
 
+:do_panel
+call :banner
+%PS% "%CTL%" -Action start-panel
+%PS% "%CTL%" -Action open-panel
+goto :done
+
+:do_open
+call :banner
+%PS% "%CTL%" -Action open-panel
+goto :done
+
+:do_status
+call :banner
+%PS% "%CTL%" -Action status
+goto :done
+
+:do_stop
+call :banner
+%PS% "%CTL%" -Action stop
+goto :done
+
+:do_stopall
+call :banner
+echo 这会同时停掉 SnowLuma 桥接，Bot 将离线。
+set "CONFIRM="
+set /p "CONFIRM=确认停止全部？(y/N): "
+if /i not "%CONFIRM%"=="y" goto :menu
+%PS% "%CTL%" -Action stop-all
+goto :done
+
+:done
+if defined CLI exit /b 0
 echo.
-echo --------------------------------------------
-echo AstraBot exited with code %errorlevel%
 pause
+goto :menu

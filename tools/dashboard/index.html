@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AstraBot 运维面板</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot" id="dot-bot" title="Bot 状态"></span>
+      <h1>AstraBot<span class="sub">运维面板</span></h1>
+    </div>
+    <div class="pills">
+      <span class="pill" id="pill-bot">Bot :8080 —</span>
+      <span class="pill" id="pill-bridge">桥接 :3001 —</span>
+      <span class="pill" id="pill-log">日志 —</span>
+    </div>
+    <div class="right">
+      <label class="switch"><input type="checkbox" id="auto" checked> 每 10s 刷新</label>
+      <span class="muted" id="updated">尚未加载</span>
+      <button id="refresh" class="btn" type="button">立即刷新</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="banner" class="banner" hidden></div>
+
+    <section class="kpis" id="kpis"></section>
+
+    <section class="grid two">
+      <div class="card">
+        <h2>按模型花费 <span class="hint">全部时间</span></h2>
+        <div class="table-wrap">
+          <table class="tbl" id="by-model">
+            <thead><tr><th>模型</th><th class="num">调用</th><th class="num">输入</th><th class="num">输出</th><th class="num">花费</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <h2>最近 14 天 <span class="hint">每日花费</span></h2>
+        <div class="bars" id="bars"></div>
+        <table class="tbl compact" id="by-kind">
+          <thead><tr><th>类型</th><th class="num">调用</th><th class="num">花费</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="grid two">
+      <div class="card">
+        <h2>最近回复 <span class="hint" id="reply-count"></span></h2>
+        <ul class="timeline" id="replies"></ul>
+      </div>
+      <div class="card">
+        <h2>最近异常 <span class="hint">WARNING / ERROR</span></h2>
+        <ul class="errors" id="errors"></ul>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>上下文补充 <span class="hint" id="ctx-hint">A4 · 本次日志窗口</span></h2>
+      <div class="ctx-grid" id="ctx"></div>
+    </section>
+
+    <section class="card">
+      <h2>表情库 <span class="hint" id="sticker-count"></span></h2>
+      <div class="thumbs" id="thumbs"></div>
+    </section>
+
+    <section class="card">
+      <h2>最近用量明细 <span class="hint">usage.jsonl</span></h2>
+      <div class="table-wrap">
+        <table class="tbl" id="recent">
+          <thead><tr><th>时间</th><th>类型</th><th>模型</th><th class="num">输入 / 缓存</th><th class="num">输出</th><th class="num">花费</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer class="muted">只读本地数据，不写入任何文件 · 数据源 <code>astrabot/chat_service/data</code></footer>
+  <script src="/app.js"></script>
+</body>
+</html>
