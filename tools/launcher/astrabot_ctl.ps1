@@ -10,6 +10,10 @@ $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $Python = Join-Path $Root '.venv-win\Scripts\python.exe'
 $PanelScript = Join-Path $Root 'tools\dashboard\server.py'
 $PanelLog = Join-Path $env:TEMP 'astrabot_dashboard.log'
+# Bot 的控制台输出单独落盘：Start-Process 起的进程窗口是隐藏的，未捕获异常的
+# traceback 只会打到那个看不见的 stdout 上；不重定向的话进程静默退出就无从查起
+# （2026-10-27 就出现过日志停在正常一行、35 分钟后才发现进程早已不在）。
+$BotLogDir = Join-Path $env:TEMP 'astrabot_bot'
 $SlDir = 'C:\Users\li204\Documents\git\tools\SnowLuma'
 $PanelPort = 8000
 $BotPort = 8080
@@ -57,12 +61,17 @@ function Start-Bot {
     if (-not (Test-Path $Python)) { Write-Host "  [错误] 找不到 venv: $Python"; return $false }
     if (-not (Test-Path (Join-Path $Root '.env'))) { Write-Host "  [错误] 缺少 .env"; return $false }
     if ($DryRun) { Write-Host "  [干跑] 将启动 Bot"; return $true }
-    Start-Process -FilePath $Python -ArgumentList 'bot.py' -WorkingDirectory $Root -WindowStyle Minimized | Out-Null
+    if (-not (Test-Path $BotLogDir)) { New-Item -ItemType Directory -Path $BotLogDir | Out-Null }
+    # 每次启动一份新文件：Start-Process 的重定向是覆盖写，复用同一个名字会在下次
+    # 启动时把上一次的崩溃现场冲掉，那就等于白留。
+    $botLog = Join-Path $BotLogDir ("bot_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
+    Start-Process -FilePath $Python -ArgumentList 'bot.py' -WorkingDirectory $Root -WindowStyle Hidden `
+        -RedirectStandardOutput $botLog -RedirectStandardError "$botLog.err" | Out-Null
     if (Wait-Port $BotPort 45) {
-        Write-Host ("  [OK] Bot 已启动 (:{0})，窗口已最小化" -f $BotPort)
+        Write-Host ("  [OK] Bot 已启动 (:{0})，控制台输出 -> {1}" -f $BotPort, $botLog)
         return $true
     }
-    Write-Host "  [警告] Bot 45s 内没监听 8080，去看它的窗口"
+    Write-Host ("  [警告] Bot 45s 内没监听 8080，看控制台输出: {0} / {0}.err" -f $botLog)
     return $false
 }
 
