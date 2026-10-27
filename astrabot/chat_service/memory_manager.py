@@ -153,7 +153,16 @@ def process_memorize(group_id: int, memorize: list, shown_ltm_ids: list[int] | N
     ids = list(shown_ltm_ids or [])
     for item in memorize:
         if isinstance(item, str):
-            add_long_term_memory(group_id, item)
+            text = item.strip()
+            if not text:
+                continue
+            # 防御：prompt 要求 ≤40 字，但模型可能整段复述；超长的一律不收
+            if len(text) > 120:
+                logger.warning(
+                    f"memorize item too long ({len(text)} chars), skipped: {text[:40]}…"
+                )
+                continue
+            add_long_term_memory(group_id, text)
         elif isinstance(item, int):
             zero_idx = item - 1
             if 0 <= zero_idx < len(ids):

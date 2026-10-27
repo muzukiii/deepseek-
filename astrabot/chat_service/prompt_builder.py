@@ -16,6 +16,16 @@ _FACTS_CAP = 1500
 _OLDMEM_CAP = 1000
 _PERSONAL_CAP = 1500
 
+# 记忆写法约束：output_style 只要求"必须包含 memorize 数组"，从没说该放什么，
+# 结果模型把每轮发生的事都写成叙事句——一个群攒到 388 条，多是"谁说了什么"。
+_MEMORIZE_GUIDE = (
+    "【写记忆的规矩】memorize 数组只放以后还用得上、且不会很快过期的内容："
+    "称呼与关系、偏好与禁忌、约定与规则、身份或长期设定。"
+    "不要放：一次性的对话事件、玩笑与梗、谁先说了什么的过程叙述、"
+    "以及从当前聊天一眼能看到的事。每条不超过 40 字、写成陈述句；"
+    "已经记过的不要重复新增；没有值得记的就给空数组。"
+)
+
 
 def _cap(text: str, limit: int) -> str:
     if not text or len(text) <= limit:
@@ -102,6 +112,7 @@ def build_main_prompt(
         "【长度要求】每次回复控制在 80 词左右（中文约 80 字），"
         "像群友接话一样自然，不要太短敷衍也不要长篇大论、不要罗列。"
     )
+    parts.append(_MEMORIZE_GUIDE)
     parts.append("")
     parts.append(trigger_marker)
 

@@ -231,10 +231,9 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     # 直接 startswith("/") 判定为假，命令于是掉进 AI 流程变成一句闲聊。
     cmd_text = plain_text.strip()
     if cmd_text.startswith("/"):
-        handled, reply_text = _run_command(bot, group_id, user_id, cmd_text, config)
+        handled, reply_text, export = _run_command(bot, group_id, user_id, cmd_text, config)
         if handled:
-            if reply_text:
-                await _send_reply(bot, event, group_id, reply_text)
+            await _send_command_result(bot, event, group_id, reply_text, export)
             return
         # 未识别的命令同样不进入 AI 流程
         logger.debug(f"Unknown command ignored: {cmd_text[:30]}")
@@ -246,12 +245,11 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
 
     _mem_content = check_implicit_memory_request(plain_text)
     if _mem_content is not None:
-        handled, reply_text = _run_command(
+        handled, reply_text, export = _run_command(
             bot, group_id, user_id, "记住：" + _mem_content, config
         )
         if handled:
-            if reply_text:
-                await _send_reply(bot, event, group_id, reply_text)
+            await _send_command_result(bot, event, group_id, reply_text, export)
             return
 
     is_at = event.is_tome()
@@ -354,8 +352,31 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
         ReplyController.set_replying(group_id, False)
 
 
+async def _send_command_result(bot, event, group_id: int, text: str, export: dict | None) -> None:
+    """发送命令结果：有导出文件就先上传 txt，再回一行统计；失败退回内联列表。"""
+    if not export:
+        if text:
+            await _send_reply(bot, event, group_id, text)
+        return
+
+    try:
+        await bot.call_api(
+            "upload_group_file",
+            group_id=group_id,
+            file=str(export["path"]),
+            name=export["name"],
+        )
+        logger.info(f"Uploaded memory export {export['name']} to group {group_id}")
+        if text:
+            await _send_reply(bot, event, group_id, text)
+    except Exception as e:
+        # 桥接可能不支持 upload_group_file，或文件被占用；退回短列表，别让用户什么都拿不到
+        logger.warning(f"upload_group_file failed for {export['name']}: {e}")
+        await _send_reply(bot, event, group_id, export.get("fallback") or text)
+
+
 def _run_command(bot, group_id: int, user_id: str, text: str, config):
-    """执行命令，返回 (是否已处理, 回复文本)。
+    """执行命令，返回 (是否已处理, 回复文本, 导出文件或 None)。
 
     命令既支持斜杠（/memory、/用量），也支持纯文本记忆指令（记住：XXX）。
 
@@ -365,9 +386,11 @@ def _run_command(bot, group_id: int, user_id: str, text: str, config):
       （删除、清空）一律 fail-safe 拒绝，避免任意群友一键清空记忆。
     - 切换人设（/人设 X）同样按破坏性对待：它改变的是机器人在整个群的说话
       方式，影响面比删一条记忆大；只查看列表的 /人设 不受限。
+
+    第三个返回值是记忆导出的文件信息（长列表改发 txt），由调用方上传。
     """
     from astrabot.chat_service.memory_commands import (
-        handle_memory_command,
+        handle_memory_command_with_export,
         is_destructive_command,
         requires_whitelist,
     )
@@ -378,25 +401,25 @@ def _run_command(bot, group_id: int, user_id: str, text: str, config):
             logger.info(
                 f"Command '{text[:20]}' denied for {user_id} (not in whitelist)"
             )
-            return True, ""
+            return True, "", None
     elif is_destructive_command(text):
         logger.warning(
             f"Destructive command '{text[:20]}' blocked for {user_id}: "
             "command_allowed_users 未配置（fail-safe 拒绝）"
         )
-        return True, "删除/清空记忆需要先配置 command_allowed_users 白名单"
+        return True, "删除/清空记忆需要先配置 command_allowed_users 白名单", None
     elif requires_whitelist(text):
         logger.warning(
             f"Command '{text[:20]}' blocked for {user_id}: "
             "切换人设需要白名单（command_allowed_users 未配置）"
         )
-        return True, "切换人设会影响整个群，需要先配置 command_allowed_users 白名单"
+        return True, "切换人设会影响整个群，需要先配置 command_allowed_users 白名单", None
 
     try:
-        return handle_memory_command(int(group_id), str(user_id), text)
+        return handle_memory_command_with_export(int(group_id), str(user_id), text)
     except Exception as e:
         logger.error(f"Command handler failed for '{text[:30]}': {e}")
-        return True, ""
+        return True, "", None
 
 
 async def _extract_reply_context(bot: Bot, group_id: int, event: GroupMessageEvent, config) -> dict:

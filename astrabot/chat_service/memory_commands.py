@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
+from pathlib import Path
 
 from astrabot.chat_service.enhanced_memory import (
     add_long_term_memory,
@@ -24,12 +26,107 @@ from astrabot.logmanager.logger import logger
 
 
 _DESTRUCTIVE_RES = (
-    re.compile(r"/memory\s+delete\s+\d+", re.IGNORECASE),
-    re.compile(r"/删除记忆\s+\d+", re.IGNORECASE),
+    re.compile(r"/memory\s+delete\s+[mf]?\d+", re.IGNORECASE),
+    re.compile(r"/删除记忆\s+[mf]?\d+", re.IGNORECASE),
 )
 
 # /人设、/persona：不带参数=查看，带参数=切换
 _PERSONA_RE = re.compile(r"^/(?:人设|persona)[ \t]*(.*)$", re.IGNORECASE)
+
+# 导出文件落盘目录（data/ 已 gitignore）；只保留最近若干份，避免无限堆积
+_EXPORT_DIR = Path(__file__).resolve().parent / "data" / "exports"
+_EXPORT_KEEP = 20
+_EXPORT_LINE_MAX = 200   # 文件里单条最多显示多少字
+_INLINE_TOP = 20         # 上传失败时聊天里最多列多少条
+
+_EXPORT_TITLES = {"long": "长期记忆", "facts": "事实记忆"}
+
+
+def _fmt_ts(ts: int | None) -> str:
+    if not ts:
+        return "未知日期"
+    return datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d")
+
+
+def build_memory_export(group_id: int, kind: str) -> dict:
+    """把记忆导出成 txt 文件，返回 {path, name, caption, fallback}。
+
+    群聊里直接列几百条会把一条消息撑爆（实测 388 条 = 23K 字），所以改成发文件：
+    文件里给统计摘要 + 按日期分组的全量内容，聊天里只回一行统计。
+    """
+    kind = "facts" if kind == "facts" else "long"
+    title = _EXPORT_TITLES[kind]
+    now = datetime.now()
+
+    if kind == "long":
+        rows = get_long_term_memories(group_id)
+        entries = [
+            {"ts": m.get("created_at"), "tag": f"m{m['id']}", "text": (m.get("content") or "").strip()}
+            for m in rows
+        ]
+        limit_note = "全量"
+    else:
+        rows = get_recent_facts(group_id, limit=200)
+        entries = [
+            {
+                "ts": f.get("created_at"),
+                "tag": f"f{f['id']}" + (f" (访问{f['access_count']})" if f.get("access_count") else ""),
+                "text": (f.get("fact") or "").strip(),
+            }
+            for f in rows
+        ]
+        limit_note = "最近 200 条"
+
+    entries = [e for e in entries if e["text"]]
+    entries.sort(key=lambda e: (e["ts"] or 0), reverse=True)
+
+    times = [int(e["ts"]) for e in entries if e["ts"]]
+    span = f"{_fmt_ts(min(times))} ~ {_fmt_ts(max(times))}" if times else "—"
+    by_month: dict[str, int] = {}
+    for t in times:
+        key = datetime.fromtimestamp(t).strftime("%Y-%m")
+        by_month[key] = by_month.get(key, 0) + 1
+    month_note = " · ".join(f"{k} {v} 条" for k, v in sorted(by_month.items(), reverse=True)[:6])
+
+    lines = [
+        f"【AstraBot 记忆导出 · {title}】",
+        f"群号：{group_id}",
+        f"导出时间：{now.strftime('%Y-%m-%d %H:%M')}",
+        f"总数：{len(entries)} 条（{limit_note}） | 时间跨度：{span}",
+    ]
+    if month_note:
+        lines.append(f"按月：{month_note}")
+    lines.append(f"说明：每行是「标签 内容」，标签可用于 /memory delete <标签>")
+    lines.append("")
+    lines.append("—— 按日期倒序 ——")
+
+    current_day = None
+    for e in entries:
+        day = _fmt_ts(e["ts"])
+        if day != current_day:
+            lines.append("")
+            lines.append(f"[{day}]")
+            current_day = day
+        text = e["text"]
+        if len(text) > _EXPORT_LINE_MAX:
+            text = text[:_EXPORT_LINE_MAX] + "…"
+        lines.append(f"  {e['tag']} {text}")
+
+    _EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    name = f"{title}_{group_id}_{now.strftime('%m%d-%H%M')}.txt"
+    path = _EXPORT_DIR / name
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+    stale = sorted(_EXPORT_DIR.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in stale[_EXPORT_KEEP:]:
+        old.unlink(missing_ok=True)
+
+    caption = f"已导出{title} {len(entries)} 条，见群文件：{name}"
+    top = [f"{e['tag']} {e['text'][:60]}" for e in entries[:_INLINE_TOP]]
+    fallback = "\n".join(
+        [f"文件发送失败，先列最近 {len(top)} 条（共 {len(entries)} 条）：", *top]
+    )
+    return {"path": path, "name": name, "caption": caption, "fallback": fallback}
 
 
 def requires_whitelist(message: str) -> bool:
@@ -135,24 +232,30 @@ def handle_memory_command(
         return True, reply
 
 
-    match = re.match(r'/memory\s+delete\s+(\d+)', message)
+    # 支持 /memory delete m12（只删长期记忆）、f311（只删事实）、以及旧的纯数字形式。
+    # 纯数字仍是"先长期、再事实"，因为导出/列表里给的是带前缀的标签，两者不会撞车。
+    match = re.match(r"/memory\s+delete\s+([mf]?)(\d+)", message)
     if not match:
-        match = re.match(r'/删除记忆\s+(\d+)', message)
-
+        match = re.match(r"/删除记忆\s+([mf]?)(\d+)", message)
     if match:
-        memory_id = int(match.group(1))
-
-        # 先尝试删除长期记忆，失败再尝试删除事实记忆
-        if delete_long_term_memory(group_id, memory_id):
-            logger.info(f"User {user_id} deleted long-term memory {memory_id}")
-            return True, f"已删除长期记忆 #{memory_id}"
-
-
-        if delete_fact(group_id, memory_id):
-            logger.info(f"User {user_id} deleted fact {memory_id}")
-            return True, f"已删除事实记忆 #{memory_id}"
-
-        return True, f"找不到记忆 #{memory_id}"
+        prefix, raw_id = (match.group(1) or "").lower(), int(match.group(2))
+        if prefix == "m":
+            if delete_long_term_memory(group_id, raw_id):
+                logger.info(f"User {user_id} deleted long-term memory {raw_id}")
+                return True, f"已删除长期记忆 m{raw_id}"
+            return True, f"找不到长期记忆 m{raw_id}"
+        if prefix == "f":
+            if delete_fact(group_id, raw_id):
+                logger.info(f"User {user_id} deleted fact {raw_id}")
+                return True, f"已删除事实记忆 f{raw_id}"
+            return True, f"找不到事实记忆 f{raw_id}"
+        if delete_long_term_memory(group_id, raw_id):
+            logger.info(f"User {user_id} deleted long-term memory {raw_id}")
+            return True, f"已删除长期记忆 #{raw_id}（下次请用 m{raw_id} 精确指定）"
+        if delete_fact(group_id, raw_id):
+            logger.info(f"User {user_id} deleted fact {raw_id}")
+            return True, f"已删除事实记忆 #{raw_id}（下次请用 f{raw_id} 精确指定）"
+        return True, f"找不到记忆 #{raw_id}"
 
 
     if message == "/memory clear" or message == "/清空事实记忆":
@@ -172,15 +275,18 @@ def handle_memory_command(
     if message == "/memory help" or message == "/记忆帮助":
         help_text = """【记忆管理命令】
 记住：XXX - 添加长期记忆
-/memory list - 查看所有长期记忆
-/memory facts - 查看最近的事实记忆
-/memory delete <id> - 删除指定记忆
+/memory list - 导出长期记忆（txt 文件）
+/memory facts - 导出事实记忆（txt 文件）
+/memory delete m12 - 删除长期记忆 #12
+/memory delete f311 - 删除事实记忆 #311
+/memory delete 12 - 旧写法（先查长期记忆，再查事实记忆）
 /memory clear - 清空所有事实记忆
 /memory help - 显示此帮助
 
 说明：
 • 长期记忆：你明确要求记住的内容，会始终加载
-• 事实记忆：AI 自动从对话中提取的事实，按相关性加载"""
+• 事实记忆：AI 自动从对话中提取的事实，按相关性加载
+• 导出文件里的 m12 / f311 标签可以直接用在删除命令里"""
         return True, help_text
 
     return False, ""
@@ -209,3 +315,30 @@ def check_implicit_memory_request(message: str) -> str | None:
             return match.group(1).strip()
 
     return None
+
+
+_LIST_CMDS = ("/memory list", "/记忆列表")
+_FACT_CMDS = ("/memory facts", "/事实记忆")
+
+
+def handle_memory_command_with_export(
+    group_id: int, user_id: str, message: str
+) -> tuple[bool, str, dict | None]:
+    """命令入口：长列表命令改为导出 txt 文件，其余命令原样走 handle_memory_command。
+
+    返回 (是否已处理, 回复文本, 导出文件信息或 None)。文件由调用方上传；
+    上传失败时用 spec["fallback"] 退回"最近 20 条"的内联展示。
+    """
+    m = message.strip()
+    if m in _LIST_CMDS or m in _FACT_CMDS:
+        kind = "facts" if m in _FACT_CMDS else "long"
+        rows = get_recent_facts(group_id, limit=1) if kind == "facts" else get_long_term_memories(group_id)
+        if not rows:
+            handled, text = handle_memory_command(group_id, user_id, message)
+            return handled, text, None
+        spec = build_memory_export(group_id, kind)
+        logger.info(f"Memory export for group {group_id}: {spec['name']}")
+        return True, spec["caption"], spec
+
+    handled, text = handle_memory_command(group_id, user_id, message)
+    return handled, text, None
