@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from html.parser import HTMLParser
 
 import httpx
@@ -19,6 +20,33 @@ MAX_TOOL_CALLS = 10  # 搜索代理最大工具调用次数
 # 一轮对话里最多让搜索代理跑几遍（群聊/私聊共用）：模型拿到结果后可能再要一次
 # 搜索，没有上限就会一路循环烧钱。
 MAX_SEARCH_ROUNDS = 3
+
+# 「说了要查却没有 search 字段」的兜底。模型偶尔会在 reply 里承诺"等我查一下/
+# 马上汇报"，但 JSON 里并不带 search，系统于是一个字都不会搜，用户就一直等着。
+# 已完成的表述（查到了/搜到了）不算承诺，除非同时说了再查/重新查/没搜到。
+_SEARCH_HINT_RE = re.compile(r"[查搜]")
+_DEFER_HINT_RE = re.compile(r"等我|稍等|稍后|马上|立刻|这就|再|一会儿|待会|汇报|回头")
+_SEARCH_DONE_RE = re.compile(r"[查搜](到|了)")
+_SEARCH_REDO_RE = re.compile(r"再[查搜]|重新[查搜]|没[查搜]到|再试")
+
+SEARCH_PROMISE_NUDGE = (
+    "你刚才的回复里说要联网查/搜，但没有给出 search 字段，系统因此什么都没搜，"
+    "对方会一直等下去。请重新输出完整 JSON，二选一：\n"
+    "1) 确实需要联网查：给出 search 字段（具体关键词），reply 可以保留\"等我查一下\"的说法；\n"
+    "2) 不需要查：把 reply 改成不承诺搜索的内容，直接回答或直接说不确定。"
+)
+
+
+def promises_search(text: str) -> bool:
+    """回复是否在承诺"要去搜/等一下给结果"，用于无 search 字段时的兜底判断。"""
+    if not text:
+        return False
+    t = str(text)
+    if not (_SEARCH_HINT_RE.search(t) and _DEFER_HINT_RE.search(t)):
+        return False
+    if _SEARCH_DONE_RE.search(t) and not _SEARCH_REDO_RE.search(t):
+        return False
+    return True
 
 # 整个搜索代理的墙钟预算（秒）：单次 LLM 调用已有 20s 超时，但最多 10 轮
 # (每轮 LLM+可能的抓取) 仍可累加成分钟级，故加一道总时限，超时即返回 best-effort。

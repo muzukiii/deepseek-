@@ -56,7 +56,12 @@ from astrabot.chat_service.prompt_builder import (
     TRIGGER_INTERRUPT,
 )
 from astrabot.chat_service.reply_controller import ReplyController, should_reply
-from astrabot.chat_service.search_engine import MAX_SEARCH_ROUNDS, run_search
+from astrabot.chat_service.search_engine import (
+    MAX_SEARCH_ROUNDS,
+    SEARCH_PROMISE_NUDGE,
+    promises_search,
+    run_search,
+)
 from astrabot.chat_service.sticker_gallery import resolve_sticker
 from astrabot.config import get_config
 from astrabot.logmanager.logger import logger
@@ -896,6 +901,14 @@ async def _ai_call_with_search(
 
     search_round = 0
     search_query = reply_json.get("search", "")
+    if not search_query and get_config().search_enabled and promises_search(reply_text):
+        # 空口承诺：reply 里说了"等我查一下/马上汇报"却没有 search 字段，
+        # 用户会一直等下去。用一次纠正性重生成，要么真搜，要么别承诺。
+        logger.info("Reply promised a search without a search field, retrying once")
+        reply_text, reply_json = await generate_reply(
+            main_prompt + "\n\n" + SEARCH_PROMISE_NUDGE
+        )
+        search_query = reply_json.get("search", "")
     if search_query and not get_config().search_enabled:
         # 联网搜索每次触发都是一串付费调用，search_enabled=false 时整条花钱路径直接不走
         logger.info(f"Search disabled by config, skipping request: {search_query}")

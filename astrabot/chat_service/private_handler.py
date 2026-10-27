@@ -24,7 +24,12 @@ from astrabot.chat_service.prompt_builder import (
     format_history,
     format_reply_lines,
 )
-from astrabot.chat_service.search_engine import MAX_SEARCH_ROUNDS, run_search
+from astrabot.chat_service.search_engine import (
+    MAX_SEARCH_ROUNDS,
+    SEARCH_PROMISE_NUDGE,
+    promises_search,
+    run_search,
+)
 from astrabot.chat_service.sticker_gallery import sticker_prompt_catalog, sticker_url
 from astrabot.config import get_config
 from astrabot.logmanager.logger import logger
@@ -175,6 +180,12 @@ async def handle_private_message(bot: Bot, event: PrivateMessageEvent):
         base_prompt = prompt
         reply_text, reply_json = await generate_reply(prompt)
         search_query = _wanted_search(reply_json, config)
+        if not search_query and config.search_enabled and promises_search(reply_text):
+            # 私聊最伤人：说了"等我几分钟，马上汇报"却没有 search 字段，
+            # 对面就一直挂着。用一次纠正性重生成兜底。
+            logger.info(f"Private reply promised a search without a search field, retrying once (user {user_id})")
+            reply_text, reply_json = await generate_reply(prompt + "\n\n" + SEARCH_PROMISE_NUDGE)
+            search_query = _wanted_search(reply_json, config)
 
         search_round = 0
         while search_query and search_round < MAX_SEARCH_ROUNDS:

@@ -17,7 +17,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from astrabot.chat_service import private_handler as ph
-from astrabot.chat_service.search_engine import MAX_SEARCH_ROUNDS
+from astrabot.chat_service.search_engine import MAX_SEARCH_ROUNDS, promises_search
 
 
 class FakeConfig:
@@ -242,6 +242,63 @@ class PrivateSearchTest(unittest.TestCase):
         bot = self._run()
         self.assertIn("等我查一下", _sent_text(bot))
         self.assertEqual(len(self.history_rows), 1, self.history_rows)
+
+    def test_promise_without_search_field_retries_once(self):
+        """说了"等我查一下"却漏了 search 字段：必须纠正一次，不能把用户晾着。"""
+        self._stub_replies(
+            [
+                ("来啦来啦，重新搜一轮～等我几分钟，有结果马上汇报给千亿大哥哥哦", {}),
+                ("这次真的查，给我几秒！", {"search": "碧蓝档案 紫发 角耳 光环"}),
+                ("查到了，是《碧蓝档案》的角瞳。", {}),
+            ],
+            summaries=["摘要"],
+        )
+        bot = self._run()
+        self.assertEqual(len(self.search_calls), 1, self.search_calls)
+        self.assertEqual(self.search_calls[0][0], "碧蓝档案 紫发 角耳 光环")
+        self.assertEqual(len(self.prompts), 3, self.prompts)
+        self.assertIn("没有给出 search 字段", self.prompts[1])
+        self.assertIn("角瞳", _sent_text(bot))
+
+    def test_promise_retry_gives_up_after_one(self):
+        """纠正一次仍然不搜：只多发一次生成，不循环、不搜、只发一条。"""
+        self._stub_replies([("等我查一下，马上汇报。", {})])
+        bot = self._run()
+        self.assertEqual(self.search_calls, [])
+        self.assertEqual(len(self.prompts), 2, self.prompts)
+        self.assertEqual(len(self.history_rows), 1, self.history_rows)
+        self.assertIn("等我查一下", _sent_text(bot))
+
+
+class SearchPromiseHeuristicTest(unittest.TestCase):
+    """promises_search() 的判定：线上真实文本必须被抓住，已完成/普通回复不能误伤。"""
+
+    def test_real_failure_text_is_promise(self):
+        text = (
+            "来啦来啦，重新搜一轮～角状耳朵加光环，这次换个思路，看看能不能锁定到具体角色！"
+            "\n等我几分钟，有结果马上汇报给千亿大哥哥哦 (๑•̀ㅂ•́)و✧"
+        )
+        self.assertTrue(promises_search(text))
+
+    def test_completed_search_is_not_promise(self):
+        self.assertFalse(
+            promises_search("查到啦！光环在碧蓝档案里是每个学生独有的标记，颜色造型各不相同～")
+        )
+
+    def test_plain_reply_is_not_promise(self):
+        self.assertFalse(promises_search("今天天气不错，出去走走吧。"))
+
+    def test_explicit_plain_search_request_is_promise(self):
+        self.assertTrue(promises_search("等我查一下。"))
+        self.assertTrue(promises_search("还没搜到，我再搜一次。"))
+
+    def test_group_path_uses_the_guard(self):
+        """群聊和私聊共用同一道兜底（函数体依赖太多，只做源码级断言）。"""
+        import inspect
+
+        from astrabot.chat_service import message_handler as mh
+
+        self.assertIn("promises_search", inspect.getsource(mh._ai_call_with_search))
 
 
 if __name__ == "__main__":
