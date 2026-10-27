@@ -5,11 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from astrabot.chat_service.paths import DATA_DIR, IGNORE_PATH, MEMORIES_PATH
 from astrabot.logmanager.logger import logger
-
-DATA_DIR = Path(__file__).resolve().parent / "data"
-MEMORIES_PATH = DATA_DIR / "memories.json"
-IGNORE_PATH = DATA_DIR / "ignores.json"
 
 
 def _load_json(path: Path) -> dict:

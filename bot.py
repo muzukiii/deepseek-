@@ -100,7 +100,9 @@ nonebot.init()
 _driver = nonebot.get_driver()
 _driver.register_adapter(Adapter)
 
-nonebot.load_plugins("astrabot")
+# chat_service/__init__.py 已不含注册代码（它现在必须是空的，好让记忆/历史层在没有
+# nonebot 的环境里也能当库 import），所以插件目录扫描扫不到它，显式补上入口模块。
+nonebot.load_all_plugins(["astrabot.chat_service.entry"], ["astrabot"])
 
 
 @_driver.on_shutdown
@@ -113,17 +115,20 @@ async def _close_shared_http_client() -> None:
 
 @_driver.on_startup
 async def _reconcile_legacy_memory() -> None:
-    """启动时把旧 memories.json 的长期记忆并入 SQLite（唯一真源）。
+    """启动时尝试旧 memories.json → SQLite 的一次性接管（默认关闭）。
 
-    迁移只跑一次：成功后 enhanced_memory 会落 data/.legacy_memory_migrated，
-    之后的启动直接跳过。必须一次性，否则每次开机都会把 JSON 里已删除的条目
-    原样灌回来。失败不影响启动——运行期仍照常工作，只是旧 JSON 里的历史条目
-    没被搬进 SQLite，下次启动会重试。
+    JSON 自 2026-10-16 停写，现在只是回滚快照，不是数据源，所以 migrate 默认直接返回：
+    把它当源灌回来会撤销删除操作（实测灌回过 349 条）。真要接管旧系统，显式设
+    ASTRA_ENABLE_LEGACY_MIGRATION=true 再启动一次；接管成功后会落
+    data/.legacy_memory_migrated 标记，之后即使开关还开着也不会重复灌。
+    失败不影响启动——运行期照常工作。
     """
     try:
         from astrabot.chat_service.enhanced_memory import migrate_from_old_memory_system
 
-        migrate_from_old_memory_system()
+        migrated = migrate_from_old_memory_system()
+        if migrated:
+            logger.info(f"旧 memories.json 已接管进 SQLite：{migrated} 条")
     except Exception as e:
         logger.warning(f"旧记忆迁移跳过（不影响启动）: {e}")
 

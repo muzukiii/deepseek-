@@ -66,6 +66,10 @@ def test_process_memorize():
 
 def test_migrate_idempotent():
     print("[migrate_from_old_memory_system 幂等去重]")
+    import os
+
+    # 迁移现在默认关（JSON 只是回滚快照），本用例测的正是开启后的接管与幂等
+    os.environ["ASTRA_ENABLE_LEGACY_MIGRATION"] = "true"
     tmp = Path(tempfile.mkdtemp(prefix="d3mem_"))
     enh.DATA_DIR = tmp
     enh.MEMORY_DB = tmp / "memories.db"
@@ -92,6 +96,7 @@ def test_migrate_idempotent():
         check(n2 == 3, f"重复迁移幂等，仍 3 条，实得 {n2}")
     finally:
         mm._load_json = r_load
+        os.environ.pop("ASTRA_ENABLE_LEGACY_MIGRATION", None)
 
 
 if __name__ == "__main__":

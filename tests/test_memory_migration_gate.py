@@ -5,6 +5,7 @@ bot.py 的 _reconcile_legacy_memory 又把 memories.json 里的 349 条灌了回
 删除全部失效，而且 created_at 变成迁移当天，按日期再也筛不出来。
 """
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -18,10 +19,14 @@ if str(ROOT) not in sys.path:
 import astrabot.chat_service.enhanced_memory as em  # noqa: E402
 from astrabot.chat_service import memory_manager as mm  # noqa: E402
 
+_SWITCH = "ASTRA_ENABLE_LEGACY_MIGRATION"
+
 
 class MigrationGateTest(unittest.TestCase):
     def setUp(self):
         self._saved = (em.DATA_DIR, em.MEMORY_DB, em._local, mm.MEMORIES_PATH)
+        self._saved_env = os.environ.get(_SWITCH)
+        os.environ[_SWITCH] = "true"          # 这些用例测的是"开启之后只灌一次"
         self.tmp = Path(tempfile.mkdtemp(prefix="miggate-"))
         em.DATA_DIR = self.tmp
         em.MEMORY_DB = self.tmp / "memories.db"
@@ -30,6 +35,10 @@ class MigrationGateTest(unittest.TestCase):
 
     def tearDown(self):
         em.DATA_DIR, em.MEMORY_DB, em._local, mm.MEMORIES_PATH = self._saved
+        if self._saved_env is None:
+            os.environ.pop(_SWITCH, None)
+        else:
+            os.environ[_SWITCH] = self._saved_env
 
     def _write_json(self, entries):
         payload = {"group_1": {"memories": entries, "users": {}}}
@@ -58,6 +67,18 @@ class MigrationGateTest(unittest.TestCase):
         self._write_json(["小池喜欢用颜文字", "后来才写进 JSON 的条目"])
         self.assertEqual(em.migrate_from_old_memory_system(), 0)
         self.assertEqual(len(em.find_long_term_memories(1)), 1)
+
+    def test_json_is_not_a_data_source_by_default(self):
+        """默认关：没有环境变量时，即使 JSON 躺在旁边也不灌、不落标记。
+
+        这是迁移到别的部署（AstrBot 侧）时的护栏 —— 只要不显式开开关，把整个 data
+        目录复制过去都不会让已删除的 349 条复活。
+        """
+        os.environ.pop(_SWITCH, None)
+        self._write_json(["会被回灌的条目", "另一条"])
+        self.assertEqual(em.migrate_from_old_memory_system(), 0)
+        self.assertEqual(em.find_long_term_memories(1), [], "默认关却灌进了 SQLite")
+        self.assertFalse(em._migration_marker().exists(), "没执行迁移就不该落标记")
 
     def test_missing_json_still_marks_done(self):
         self.assertEqual(em.migrate_from_old_memory_system(), 0)

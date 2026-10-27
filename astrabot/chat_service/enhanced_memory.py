@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import threading
@@ -18,12 +19,10 @@ from pathlib import Path
 from typing import Literal
 
 from astrabot.chat_service.ai_client import chat
+from astrabot.chat_service.paths import DATA_DIR, MEMORY_DB
 from astrabot.chat_service.text_tokenizer import extract_keywords, term_list
 from astrabot.config import get_config
 from astrabot.logmanager.logger import logger
-
-DATA_DIR = Path(__file__).resolve().parent / "data"
-MEMORY_DB = DATA_DIR / "memories.db"
 _local = threading.local()
 
 
@@ -669,14 +668,27 @@ def _migration_marker() -> Path:
     return DATA_DIR / ".legacy_memory_migrated"
 
 
-def migrate_from_old_memory_system() -> int:
-    """把旧 memories.json 的长期记忆并入 SQLite —— 只在首次执行。
+def _legacy_migration_enabled() -> bool:
+    """旧 JSON 迁移默认关闭。
 
-    JSON 早已停写，只作为回滚快照保留。如果每次启动都重跑，删除就不生效：
-    删掉的条目会在下次开机被 JSON 原样灌回来（2026-10-27 实测删掉 490 条，
-    一次重启后全部复活，且 created_at 变成迁移当天，按日期再也筛不出来）。
-    所以成功后落一个标记文件，之后直接跳过；中途异常不落标记，下次再试。
+    `memories.json` 从 2026-10-16 起就停止写入，只剩"回滚快照"这一个身份；把它当作
+    数据源灌回 SQLite 会直接撤销删除操作（2026-10-27 实测灌回 349 条）。要接管旧系统
+    时显式设 ASTRA_ENABLE_LEGACY_MIGRATION=true，其余情况一律不动。
     """
+    return (os.environ.get("ASTRA_ENABLE_LEGACY_MIGRATION") or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def migrate_from_old_memory_system() -> int:
+    """把旧 memories.json 的长期记忆并入 SQLite —— 只在显式开启且首次执行时。
+
+    两道闸门：① 环境变量开关，默认关；② 成功执行后落一个标记文件，之后直接跳过——
+    否则每次启动都会把已删除的条目从 JSON 原样灌回来（且 created_at 变成迁移当天，
+    按日期再也筛不出来）。中途异常不落标记，下次再试。
+    """
+    if not _legacy_migration_enabled():
+        return 0
     if _migration_marker().exists():
         return 0
 
