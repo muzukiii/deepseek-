@@ -56,13 +56,12 @@ from astrabot.chat_service.prompt_builder import (
     TRIGGER_INTERRUPT,
 )
 from astrabot.chat_service.reply_controller import ReplyController, should_reply
-from astrabot.chat_service.search_engine import run_search
+from astrabot.chat_service.search_engine import MAX_SEARCH_ROUNDS, run_search
 from astrabot.chat_service.sticker_gallery import resolve_sticker
 from astrabot.config import get_config
 from astrabot.logmanager.logger import logger
 
 TOTAL_TIMEOUT = 360
-MAX_SEARCH_ROUNDS = 3
 
 # 群成员「昵称 -> QQ号」映射缓存：group_id -> (mapping, expire_at)
 _NAME_MAP_CACHE: dict[int, tuple[dict[str, int], float]] = {}

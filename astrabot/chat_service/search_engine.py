@@ -16,6 +16,10 @@ from astrabot.logmanager.logger import logger
 
 MAX_TOOL_CALLS = 10  # 搜索代理最大工具调用次数
 
+# 一轮对话里最多让搜索代理跑几遍（群聊/私聊共用）：模型拿到结果后可能再要一次
+# 搜索，没有上限就会一路循环烧钱。
+MAX_SEARCH_ROUNDS = 3
+
 # 整个搜索代理的墙钟预算（秒）：单次 LLM 调用已有 20s 超时，但最多 10 轮
 # (每轮 LLM+可能的抓取) 仍可累加成分钟级，故加一道总时限，超时即返回 best-effort。
 # 可由 config.search_wallclock_timeout 覆盖。

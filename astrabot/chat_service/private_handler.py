@@ -8,18 +8,43 @@ from datetime import datetime
 from nonebot.adapters.onebot.v11 import Bot, MessageSegment, PrivateMessageEvent
 
 from astrabot.chat_service.ai_client import analyze_images, generate_reply
-from astrabot.chat_service.history_manager import append_message, select_context, trim_history
+from astrabot.chat_service.history_manager import (
+    append_message,
+    get_history_since,
+    select_context,
+    trim_history,
+)
 from astrabot.chat_service.history_summarizer import schedule_summarize
 from astrabot.chat_service.image_utils import download_image_base64
 from astrabot.chat_service.prompt_builder import (
     build_image_analysis_prompt,
     build_main_prompt,
+    build_search_inject_prompt,
     format_history,
     format_reply_lines,
 )
+from astrabot.chat_service.search_engine import MAX_SEARCH_ROUNDS, run_search
 from astrabot.chat_service.sticker_gallery import sticker_prompt_catalog, sticker_url
 from astrabot.config import get_config
 from astrabot.logmanager.logger import logger
+
+
+def _wanted_search(reply_json, config) -> str:
+    """取模型这一轮想要的搜索词；总开关关掉或字段不合法时返回空串。
+
+    search_enabled=false 时整条付费路径都不该走，所以在这里就掐掉，
+    免得调用方还要各自判一次。
+    """
+    if not isinstance(reply_json, dict):
+        return ""
+    query = reply_json.get("search", "")
+    if not isinstance(query, str):
+        return ""
+    query = query.strip()
+    if query and not config.search_enabled:
+        logger.info(f"Search disabled by config, skipping private request: {query}")
+        return ""
+    return query
 
 
 async def handle_private_message(bot: Bot, event: PrivateMessageEvent):
@@ -98,22 +123,22 @@ async def handle_private_message(bot: Bot, event: PrivateMessageEvent):
         current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
     prompt = prompt.replace(config.extra_style, extra_style, 1)
-    try:
-        reply_text, reply_json = await generate_reply(prompt)
-        if not reply_text:
-            logger.warning(f"No private reply generated for user {user_id}")
+
+    async def _deliver(text_out: str, sticker_id=None) -> None:
+        """把一条回复发出去并记进历史（私聊仍是"多气泡"风格）。"""
+        if not text_out:
             return
-        image_url = await sticker_url(reply_json.get("sticker_id"))
-        # 私聊仍是"多气泡"风格，但先按"只在句末换行"整理再按行拆分：
-        # 以前直接 split("[/]")，模型断在句中时会把一句话劈成两条消息。
-        reply_text = format_reply_lines(reply_text)
-        bubbles = [part.strip() for part in reply_text.split("\n") if part.strip()]
+        image_url = await sticker_url(sticker_id)
+        # 先按"只在句末换行"整理再按行拆分：以前直接 split("[/]")，
+        # 模型断在句中时会把一句话劈成两条消息。
+        text_out = format_reply_lines(text_out)
+        bubbles = [part.strip() for part in text_out.split("\n") if part.strip()]
         for index, part in enumerate(bubbles):
             segments = [MessageSegment.text(part)]
             if index == 0 and image_url:
                 segments.append(MessageSegment.image(image_url))
             await bot.send_private_msg(user_id=user_id, message=segments)
-        flat = reply_text.replace("\n", " ").strip()
+        flat = text_out.replace("\n", " ").strip()
         await append_message(conversation_id, {
             "time": int(time.time()),
             "message_id": 0,
@@ -123,7 +148,43 @@ async def handle_private_message(bot: Bot, event: PrivateMessageEvent):
             "msg_type": "bot",
             "segments": [{"type": "text", "text": flat}],
         })
-        await trim_history(conversation_id)
         logger.info(f"Replied to private user {user_id}")
+
+    try:
+        base_prompt = prompt
+        reply_text, reply_json = await generate_reply(prompt)
+        search_query = _wanted_search(reply_json, config)
+
+        search_round = 0
+        while search_query and search_round < MAX_SEARCH_ROUNDS:
+            search_round += 1
+            # 搜索要跑几秒到几十秒，先把已经想好的那句发出去，
+            # 否则模型说的"等我查一下"会变成已读不回。
+            await _deliver(reply_text)
+            logger.info(f"Private search round {search_round} for user {user_id}: {search_query}")
+
+            context = f"私聊中 {user_name}({user_id}) 说：{text}"
+            search_since = int(time.time())
+            search_result = await run_search(search_query, context)
+            new_msgs = await get_history_since(conversation_id, search_since)
+            search_summary = search_result.get("summary", "") if isinstance(search_result, dict) else ""
+            if not search_summary:
+                logger.warning(f"Private search returned empty result for user {user_id}")
+
+            search_inject = build_search_inject_prompt(
+                search_summary=search_summary,
+                new_messages_since_search=format_history(new_msgs),
+                search_failed=not search_summary,
+                current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            logger.debug(f"===== PRIVATE SEARCH INJECT round {search_round} =====\n{search_inject}\n===== END =====")
+            reply_text, reply_json = await generate_reply(base_prompt + "\n\n" + search_inject)
+            search_query = _wanted_search(reply_json, config)
+
+        if not reply_text:
+            logger.warning(f"No private reply generated for user {user_id}")
+            return
+        await _deliver(reply_text, reply_json.get("sticker_id"))
+        await trim_history(conversation_id)
     except Exception as exc:
         logger.exception(f"Private reply failed for user {user_id}: {exc}")
