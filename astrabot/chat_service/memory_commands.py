@@ -17,7 +17,9 @@ from pathlib import Path
 
 from astrabot.chat_service.enhanced_memory import (
     add_long_term_memory,
+    delete_long_term_memories_by_ids,
     delete_long_term_memory,
+    find_long_term_memories,
     get_long_term_memories,
     get_recent_facts,
     delete_fact,
@@ -28,6 +30,10 @@ from astrabot.logmanager.logger import logger
 _DESTRUCTIVE_RES = (
     re.compile(r"/memory\s+delete\s+[mf]?\d+", re.IGNORECASE),
     re.compile(r"/删除记忆\s+[mf]?\d+", re.IGNORECASE),
+    # 批量删：预览也要白名单（否则任何群友都能枚举并看到统计），确认更要
+    re.compile(r"/memory\s+delete\s+before\s+\S+", re.IGNORECASE),
+    re.compile(r"/memory\s+delete\s+keyword\s+\S+", re.IGNORECASE),
+    re.compile(r"/memory\s+clear\s+long", re.IGNORECASE),
 )
 
 # /人设、/persona：不带参数=查看，带参数=切换
@@ -46,6 +52,20 @@ def _fmt_ts(ts: int | None) -> str:
     if not ts:
         return "未知日期"
     return datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d")
+
+
+def _unique_path(name: str) -> Path:
+    """同名文件已存在时追加 -2/-3…，避免连续导出或连续删除互相覆盖备份。"""
+    path = _EXPORT_DIR / name
+    if not path.exists():
+        return path
+    base, suffix = path.stem, path.suffix
+    i = 2
+    while True:
+        candidate = _EXPORT_DIR / f"{base}-{i}{suffix}"
+        if not candidate.exists():
+            return candidate
+        i += 1
 
 
 def build_memory_export(group_id: int, kind: str) -> dict:
@@ -113,8 +133,9 @@ def build_memory_export(group_id: int, kind: str) -> dict:
         lines.append(f"  {e['tag']} {text}")
 
     _EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-    name = f"{title}_{group_id}_{now.strftime('%m%d-%H%M')}.txt"
-    path = _EXPORT_DIR / name
+    name = f"{title}_{group_id}_{now.strftime('%m%d-%H%M%S')}-{now.microsecond // 1000:03d}.txt"
+    path = _unique_path(name)
+    name = path.name
     path.write_text("\n".join(lines), encoding="utf-8")
 
     stale = sorted(_EXPORT_DIR.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -280,13 +301,18 @@ def handle_memory_command(
 /memory delete m12 - 删除长期记忆 #12
 /memory delete f311 - 删除事实记忆 #311
 /memory delete 12 - 旧写法（先查长期记忆，再查事实记忆）
+/memory delete before 10-20 - 批量删早于该日的长期记忆
+/memory delete keyword 表情包 - 批量删含关键词的长期记忆
+/memory clear long - 清空全部长期记忆
 /memory clear - 清空所有事实记忆
 /memory help - 显示此帮助
 
 说明：
 • 长期记忆：你明确要求记住的内容，会始终加载
 • 事实记忆：AI 自动从对话中提取的事实，按相关性加载
-• 导出文件里的 m12 / f311 标签可以直接用在删除命令里"""
+• 导出文件里的 m12 / f311 标签可以直接用在删除命令里
+• 三条批量命令都是先预览条数，确认时在同一句末尾加 confirm；
+  确认那一步会先把要删的条目导出成备份文件再执行"""
         return True, help_text
 
     return False, ""
@@ -330,6 +356,10 @@ def handle_memory_command_with_export(
     上传失败时用 spec["fallback"] 退回"最近 20 条"的内联展示。
     """
     m = message.strip()
+    bulk = try_bulk_delete(group_id, message)
+    if bulk is not None:
+        return bulk
+
     if m in _LIST_CMDS or m in _FACT_CMDS:
         kind = "facts" if m in _FACT_CMDS else "long"
         rows = get_recent_facts(group_id, limit=1) if kind == "facts" else get_long_term_memories(group_id)
@@ -342,3 +372,130 @@ def handle_memory_command_with_export(
 
     handled, text = handle_memory_command(group_id, user_id, message)
     return handled, text, None
+
+
+# ========== 批量删除长期记忆（预览 → 同一条件 + confirm，先备份再删） ==========
+_BULK_BEFORE_RE = re.compile(
+    r"^/memory\s+delete\s+before\s+(\d{4}-\d{2}-\d{2}|\d{2}-\d{2})(\s+confirm)?$", re.IGNORECASE
+)
+_BULK_KW_RE = re.compile(r"^/memory\s+delete\s+keyword\s+(.+?)(\s+confirm)?$", re.IGNORECASE)
+_CLEAR_LONG_RE = re.compile(r"^/memory\s+clear\s+long(\s+confirm)?$", re.IGNORECASE)
+
+
+def _parse_cutoff(raw: str) -> int:
+    """`2026-10-20` 或 `10-20` → 当天 00:00 的时间戳（本地时区）。"""
+    txt = raw if len(raw) == 10 else f"{datetime.now().year}-{raw}"
+    return int(datetime.strptime(txt, "%Y-%m-%d").timestamp())
+
+
+def _write_delete_backup(group_id: int, entries: list[dict]) -> dict:
+    """把"本次要删的条目"写成备份 txt，返回 {path, name, caption, fallback}。"""
+    now = datetime.now()
+    lines = [
+        "【AstraBot 删除备份 · 长期记忆】",
+        f"群号：{group_id}",
+        f"导出时间：{now.strftime('%Y-%m-%d %H:%M')}",
+        f"总数：{len(entries)} 条（本次删除的条目，按日期倒序）",
+    ]
+    current_day = None
+    for e in entries:
+        day = _fmt_ts(e["ts"])
+        if day != current_day:
+            lines.append("")
+            lines.append(f"[{day}]")
+            current_day = day
+        text = e["text"]
+        if len(text) > _EXPORT_LINE_MAX:
+            text = text[:_EXPORT_LINE_MAX] + "…"
+        lines.append(f"  {e['tag']} {text}")
+
+    _EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    name = f"删除备份_长期记忆_{group_id}_{now.strftime('%m%d-%H%M%S')}-{now.microsecond // 1000:03d}.txt"
+    path = _unique_path(name)
+    name = path.name
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+    stale = sorted(_EXPORT_DIR.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in stale[_EXPORT_KEEP:]:
+        old.unlink(missing_ok=True)
+    return {
+        "path": path,
+        "name": name,
+        "caption": f"备份见群文件：{name}",
+        "fallback": f"备份文件发送失败，本地备份：{name}",
+    }
+
+
+def _bulk_delete_long(
+    group_id: int,
+    *,
+    label: str,
+    confirm_hint: str,
+    before_ts: int | None = None,
+    keyword: str | None = None,
+    confirm: bool = False,
+) -> tuple[bool, str, dict | None]:
+    """按条件批量删长期记忆：预览只报数；confirm 才先备份、再删。"""
+    rows = find_long_term_memories(group_id, before_ts=before_ts, keyword=keyword)
+    if not rows:
+        return True, f"没有符合条件的长期记忆（{label}）", None
+
+    entries = [
+        {"ts": r.get("created_at"), "tag": f"m{r['id']}", "text": (r.get("content") or "").strip()}
+        for r in rows
+    ]
+    ids = [r["id"] for r in rows]
+    times = [int(e["ts"]) for e in entries if e["ts"]]
+    span = f"{_fmt_ts(min(times))} ~ {_fmt_ts(max(times))}" if times else "—"
+
+    if not confirm:
+        return True, (
+            f"将删除 {len(ids)} 条长期记忆（{label}，{span}，m{min(ids)} ~ m{max(ids)}）\n"
+            f"删除前会自动导出备份。确认请发：\n{confirm_hint}"
+        ), None
+
+    spec = _write_delete_backup(group_id, entries)
+    removed = delete_long_term_memories_by_ids(group_id, ids)
+    logger.warning(
+        f"Bulk deleted {removed} long-term memories in group {group_id} ({label}); "
+        f"backup={spec['name']}"
+    )
+    spec["caption"] = f"已删除 {removed} 条长期记忆（{label}），备份见群文件：{spec['name']}"
+    spec["fallback"] = f"已删除 {removed} 条长期记忆（{label}）。备份文件发送失败，本地备份：{spec['name']}"
+    return True, spec["caption"], spec
+
+
+def try_bulk_delete(group_id: int, message: str) -> tuple[bool, str, dict | None] | None:
+    """批量删除入口；不是批量删除指令时返回 None，交给原处理器。"""
+    m = message.strip()
+    mb = _BULK_BEFORE_RE.match(m)
+    if mb:
+        cutoff = _parse_cutoff(mb.group(1))
+        return _bulk_delete_long(
+            group_id,
+            before_ts=cutoff,
+            confirm=bool(mb.group(2)),
+            label=f"早于 {datetime.fromtimestamp(cutoff).strftime('%Y-%m-%d')}",
+            confirm_hint=f"/memory delete before {mb.group(1)} confirm",
+        )
+    mk = _BULK_KW_RE.match(m)
+    if mk:
+        kw = mk.group(1).strip()
+        if not kw:
+            return True, "关键词不能为空", None
+        return _bulk_delete_long(
+            group_id,
+            keyword=kw,
+            confirm=bool(mk.group(2)),
+            label=f"含「{kw}」",
+            confirm_hint=f"/memory delete keyword {kw} confirm",
+        )
+    mcl = _CLEAR_LONG_RE.match(m)
+    if mcl:
+        return _bulk_delete_long(
+            group_id,
+            confirm=bool(mcl.group(1)),
+            label="清空全部长期记忆",
+            confirm_hint="/memory clear long confirm",
+        )
+    return None

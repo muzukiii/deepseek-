@@ -527,6 +527,43 @@ def delete_long_term_memory(group_id: int, memory_id: int) -> bool:
     return cur.rowcount > 0
 
 
+def find_long_term_memories(
+    group_id: int,
+    before_ts: int | None = None,
+    keyword: str | None = None,
+) -> list[dict]:
+    """按条件查长期记忆（批量删除前先用它取候选，用于预览与备份）。
+
+    keyword 用 instr 而不是 LIKE：避免用户在关键词里写 % 或 _ 变成通配符。
+    """
+    conn = _get_db()
+    conn.row_factory = sqlite3.Row
+    sql = "SELECT id, content, created_at, created_by FROM long_term_memories WHERE group_id = ?"
+    args: list = [group_id]
+    if before_ts is not None:
+        sql += " AND created_at < ?"
+        args.append(int(before_ts))
+    if keyword:
+        sql += " AND instr(content, ?) > 0"
+        args.append(keyword)
+    sql += " ORDER BY created_at ASC, id ASC"
+    return [dict(r) for r in conn.execute(sql, args).fetchall()]
+
+
+def delete_long_term_memories_by_ids(group_id: int, ids: list[int]) -> int:
+    """按 id 批量删除长期记忆，返回实际删除条数。"""
+    if not ids:
+        return 0
+    conn = _get_db()
+    placeholders = ",".join("?" for _ in ids)
+    cur = conn.execute(
+        f"DELETE FROM long_term_memories WHERE group_id = ? AND id IN ({placeholders})",
+        [group_id, *ids],
+    )
+    conn.commit()
+    return cur.rowcount
+
+
 
 
 def set_user_impression(
