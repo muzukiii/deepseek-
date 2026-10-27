@@ -33,6 +33,68 @@ def _cap(text: str, limit: int) -> str:
     return text[:limit].rstrip() + "\n…（记忆内容过长，已截断）"
 
 
+# 排版：模型的换行标记是 [/]，但它常在句中乱断，一条回复被劈成几行碎句。
+# 提示词里先立规矩，发送前再用 format_reply_lines 做确定性兜底。
+_LAYOUT_GUIDE = (
+    "【排版】分行只分在句子之间：一行就是一句完整的话，句末带 。！？～ 之类；"
+    "绝对不要在句子中间、词与词之间换行。多句话时每句一行；"
+    "一句话就能说完时就别换行。整条回复最多 3 行。"
+)
+
+_SENT_END = "。！？!?…～"
+_CLOSERS = "”\"’'）)」』】》〉"
+_EMOJI_END = "✧☆♪★"
+# 中文闲聊常以语气词收尾而没有标点（"是兰山才对嘛"），这些也算一句话说完，
+# 否则会把正常的换行误判成"句中折断"合并回去，反而糊成一大坨。
+_PARTICLES = "嘛啦吧呀呢哦啊哈呗咯喔噢诶嘿嗯呐哇唔咯嘞"
+
+
+def _ends_sentence(line: str) -> bool:
+    s = line.rstrip()
+    if not s:
+        return False
+    return (
+        s[-1] in _SENT_END
+        or s[-1] in _CLOSERS
+        or s[-1] in _EMOJI_END
+        or s[-1] in _PARTICLES
+    )
+
+
+def _split_sentences(line: str) -> list[str]:
+    """只在句末标点后切开，用于把过长的一行排成多行。"""
+    parts = re.findall(r"[^。！？!?…]*[。！？!?…]+|[^。！？!?…]+$", line)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def format_reply_lines(text: str, max_lines: int = 3, auto_split_over: int = 80) -> str:
+    """把回复整理成"只在句末换行"的版式（模型排版失误的确定性兜底）。
+
+    1) 模型用 [/]（或真换行）标断行；断在句中（上一行没有句末标点）就合并回去
+    2) 一行里塞了多句且过长（> auto_split_over）时，按句末标点排成多行
+    3) 超过 max_lines 的部分并到最后一行，避免一屏全是几个字的短行
+    """
+    if not text:
+        return ""
+    lines: list[str] = []
+    for part in re.split(r"\[/\]|\r?\n", text):
+        piece = part.strip()
+        if not piece:
+            continue
+        if lines and not _ends_sentence(lines[-1]):
+            lines[-1] += piece
+        else:
+            lines.append(piece)
+
+    spread: list[str] = []
+    for line in lines:
+        spread.extend(_split_sentences(line) if len(line) > auto_split_over else [line])
+
+    if len(spread) > max_lines:
+        spread = spread[: max_lines - 1] + ["".join(spread[max_lines - 1 :])]
+    return "\n".join(spread)
+
+
 def build_main_prompt(
     config: Config,
     plugin_section: str,
@@ -112,6 +174,7 @@ def build_main_prompt(
         "【长度要求】每次回复控制在 80 词左右（中文约 80 字），"
         "像群友接话一样自然，不要太短敷衍也不要长篇大论、不要罗列。"
     )
+    parts.append(_LAYOUT_GUIDE)
     parts.append(_MEMORIZE_GUIDE)
     parts.append("")
     parts.append(trigger_marker)

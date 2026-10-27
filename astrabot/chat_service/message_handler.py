@@ -48,6 +48,7 @@ from astrabot.chat_service.prompt_builder import (
     build_message_text,
     build_search_inject_prompt,
     build_trigger_line,
+    format_reply_lines,
     format_history,
     TRIGGER_AT,
     TRIGGER_MAIN,
@@ -1110,9 +1111,9 @@ async def _send_reply(
 
     # [/] 原本是拆成多条消息发送（模仿真人连发多气泡），现在合并为
     # 单条消息、用换行分隔，避免刷屏并让回答更完整。
-    joined = "\n".join(
-        part.strip() for part in text.split("[/]") if part.strip()
-    )
+    # 但模型常断在句中，导致一句话被劈成两行——统一走 format_reply_lines，
+    # 只在句末换行，并把过多短行并回去。
+    joined = format_reply_lines(text)
 
     segments: list = []
     _append_with_at(segments, joined)
@@ -1163,9 +1164,8 @@ async def _send_reply(
 
     if record_reply:
         config = get_config()
-        plain = re.sub(r"\[at:\d+\]", "", joined)
-
-        plain = plain.replace("[/]", "\n").strip()
+        # joined 已经是格式化后的正文（只在句末换行），直接去掉 @ 标记记录即可
+        plain = re.sub(r"\[at:\d+\]", "", joined).strip()
         reply_record = {
             "time": int(time.time()),
             "user_id": str(bot.self_id),

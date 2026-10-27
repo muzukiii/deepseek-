@@ -24,7 +24,7 @@ from astrabot.chat_service.message_handler import (
     resolve_plain_at,
 )
 from astrabot.chat_service.persona_store import persona_directive
-from astrabot.chat_service.prompt_builder import format_history
+from astrabot.chat_service.prompt_builder import format_history, format_reply_lines
 from astrabot.config import get_config
 from astrabot.logmanager.logger import logger
 
@@ -146,9 +146,7 @@ async def handle_poke(bot: Bot, data: dict) -> None:
         reply_text = resolve_plain_at(reply_text, name_to_qq)
 
     reply_text = re.sub(rf"\[at:{self_id}\]", "", reply_text)
-    reply_text = "\n".join(
-        part.strip() for part in reply_text.split("[/]") if part.strip()
-    )
+    reply_text = format_reply_lines(reply_text)
     reply_text = re.sub(r"[ \t]{2,}", " ", reply_text).strip()
     if not reply_text:
         return

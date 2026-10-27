@@ -15,6 +15,7 @@ from astrabot.chat_service.prompt_builder import (
     build_image_analysis_prompt,
     build_main_prompt,
     format_history,
+    format_reply_lines,
 )
 from astrabot.chat_service.sticker_gallery import sticker_prompt_catalog, sticker_url
 from astrabot.config import get_config
@@ -103,20 +104,24 @@ async def handle_private_message(bot: Bot, event: PrivateMessageEvent):
             logger.warning(f"No private reply generated for user {user_id}")
             return
         image_url = await sticker_url(reply_json.get("sticker_id"))
-        for index, part in enumerate(reply_text.split("[/]")):
-            if part.strip():
-                segments = [MessageSegment.text(part.strip())]
-                if index == 0 and image_url:
-                    segments.append(MessageSegment.image(image_url))
-                await bot.send_private_msg(user_id=user_id, message=segments)
+        # 私聊仍是"多气泡"风格，但先按"只在句末换行"整理再按行拆分：
+        # 以前直接 split("[/]")，模型断在句中时会把一句话劈成两条消息。
+        reply_text = format_reply_lines(reply_text)
+        bubbles = [part.strip() for part in reply_text.split("\n") if part.strip()]
+        for index, part in enumerate(bubbles):
+            segments = [MessageSegment.text(part)]
+            if index == 0 and image_url:
+                segments.append(MessageSegment.image(image_url))
+            await bot.send_private_msg(user_id=user_id, message=segments)
+        flat = reply_text.replace("\n", " ").strip()
         await append_message(conversation_id, {
             "time": int(time.time()),
             "message_id": 0,
             "user_id": str(bot.self_id),
             "user_name": config.name_cn,
-            "message": reply_text.replace("[/]", " ").strip(),
+            "message": flat,
             "msg_type": "bot",
-            "segments": [{"type": "text", "text": reply_text.replace("[/]", " ").strip()}],
+            "segments": [{"type": "text", "text": flat}],
         })
         await trim_history(conversation_id)
         logger.info(f"Replied to private user {user_id}")
