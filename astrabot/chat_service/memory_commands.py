@@ -304,12 +304,14 @@ def handle_memory_command(
 /memory delete before 10-20 - 批量删早于该日的长期记忆
 /memory delete keyword 表情包 - 批量删含关键词的长期记忆
 /memory clear long - 清空全部长期记忆
-/memory clear - 清空所有事实记忆
+/memory clear - 只回显提示，不删（确认用下一行）
+/memory clear confirm - 清空本群事实记忆（长期记忆保留）
 /memory help - 显示此帮助
 
 说明：
 • 长期记忆：你明确要求记住的内容，会始终加载
 • 事实记忆：AI 自动从对话中提取的事实，按相关性加载
+• 列表改发群文件（txt）；上传失败时自动回退为最近 20 条
 • 导出文件里的 m12 / f311 标签可以直接用在删除命令里
 • 三条批量命令都是先预览条数，确认时在同一句末尾加 confirm；
   确认那一步会先把要删的条目导出成备份文件再执行"""
