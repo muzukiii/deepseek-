@@ -410,6 +410,9 @@ def add_long_term_memory(
         conn.commit()
         return True
     except sqlite3.IntegrityError:
+        # 隐式事务此时已经 BEGIN，不回滚就会一直占着写锁：本进程还能写，
+        # 但外部进程从此永远 database is locked，WAL 也无法 checkpoint。
+        conn.rollback()
         return False
 
 
@@ -661,8 +664,22 @@ def build_memory_context(
 
 
 
-def migrate_from_old_memory_system():
-    """从旧的 memories.json 迁移数据"""
+def _migration_marker() -> Path:
+    """迁移完成标记；每次调用时取 DATA_DIR，便于测试重定向。"""
+    return DATA_DIR / ".legacy_memory_migrated"
+
+
+def migrate_from_old_memory_system() -> int:
+    """把旧 memories.json 的长期记忆并入 SQLite —— 只在首次执行。
+
+    JSON 早已停写，只作为回滚快照保留。如果每次启动都重跑，删除就不生效：
+    删掉的条目会在下次开机被 JSON 原样灌回来（2026-10-27 实测删掉 490 条，
+    一次重启后全部复活，且 created_at 变成迁移当天，按日期再也筛不出来）。
+    所以成功后落一个标记文件，之后直接跳过；中途异常不落标记，下次再试。
+    """
+    if _migration_marker().exists():
+        return 0
+
     from astrabot.chat_service.memory_manager import _load_json, MEMORIES_PATH
 
     data = _load_json(MEMORIES_PATH)
@@ -690,3 +707,6 @@ def migrate_from_old_memory_system():
                 set_user_impression(group_id, user_id, impression)
 
     logger.info(f"Migrated {migrated_count} memories from old system")
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _migration_marker().write_text(str(int(time.time())), encoding="utf-8")
+    return migrated_count
