@@ -12,6 +12,7 @@ from astrabot.chat_service.history_manager import (
     append_message,
     get_history_since,
     select_context,
+    set_image_descriptions,
     trim_history,
 )
 from astrabot.chat_service.history_summarizer import schedule_summarize
@@ -59,6 +60,7 @@ async def handle_private_message(bot: Bot, event: PrivateMessageEvent):
     # 只能凭上文瞎猜（日志思维链里出现过 "Another image, no description"）。
     images_b64: list[str] = []
     image_count = 0
+    image_seg_idx: list[int] = []  # 成功下载的图在存储 segments 里的下标（第 k 张图 = 下标 k）
     for seg in event.get_message():
         if seg.type != "image":
             continue
@@ -69,6 +71,7 @@ async def handle_private_message(bot: Bot, event: PrivateMessageEvent):
         got = await download_image_base64(url)
         if got:
             images_b64.append(got)
+            image_seg_idx.append(image_count)
 
     if not text and image_count == 0:
         return
@@ -96,7 +99,6 @@ async def handle_private_message(bot: Bot, event: PrivateMessageEvent):
     schedule_summarize(conversation_id, config.history_messages, config)
 
     # 识别本轮私聊里的图片，把描述并入文本，让模型真的"看到"图
-    image_descs: list[str] = []
     if images_b64:
         ctx = "".join(
             f"{m.get('user_name','?')}：{m.get('message','')}\n"
@@ -104,10 +106,29 @@ async def handle_private_message(bot: Bot, event: PrivateMessageEvent):
         )
         analysis_prompt = build_image_analysis_prompt(config.image_analyzer, ctx)
         result = await analyze_images(images_b64, analysis_prompt)
-        image_descs = [v for _, v in sorted(result.items()) if v]
-        if image_descs:
-            desc_text = "；".join(image_descs)
+        result = result if isinstance(result, dict) else {}
+        keys = sorted(result)
+        desc_by_pos: list[tuple[int, str]] = []
+        for i, seg_idx in enumerate(image_seg_idx):
+            desc = result.get(f"image_{i + 1}")
+            if not isinstance(desc, str) or not desc.strip():
+                # 模型没按 image_N 约定给键时，退化成"排序后按位置取"
+                desc = result.get(keys[i]) if i < len(keys) else ""
+            if isinstance(desc, str) and desc.strip():
+                desc_by_pos.append((seg_idx, desc.strip()))
+        if desc_by_pos:
+            desc_text = "；".join(d for _, d in desc_by_pos)
             text = f"{text} [图片][图片描述：{desc_text}]".strip() if text else f"[图片][图片描述：{desc_text}]"
+            # 描述要写回历史：消息是在识图之前落库的，不回写的话这张图只有本轮
+            # "看得见"，下一轮再提就只剩模型自己上一句的转述，搜索词会褪成
+            # "XX 光环 角色"这种泛词。
+            try:
+                await set_image_descriptions(
+                    conversation_id,
+                    {int(event.message_id): dict(desc_by_pos)},
+                )
+            except Exception as e:
+                logger.debug(f"Failed to persist private image descriptions: {e}")
         else:
             logger.debug(f"Private image analysis returned nothing for user {user_id}")
 
